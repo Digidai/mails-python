@@ -293,6 +293,15 @@ asyncio.run(main())
 | `NotFoundError` | 404 response |
 | `ApiError` | Any other non-2xx response (has `.status_code`) |
 
+## Ecosystem
+
+| Project | Description |
+|---|---|
+| [mails](https://github.com/Digidai/mails) | Email server (Worker) + CLI + TypeScript SDK |
+| [mails-agent-mcp](https://github.com/Digidai/mails-mcp) | MCP Server for AI agents |
+| [mails-agent (Python)](https://github.com/Digidai/mails-python) (this repo) | Python SDK |
+| [mails-skills](https://github.com/Digidai/mails-skills) | Skill files for AI agents |
+
 ## License
 
 MIT
