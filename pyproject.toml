@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mails-agent"
-version = "1.4.0b1"
+version = "1.4.0b2"
 description = "Python SDK for mails-agent — email capabilities for AI agents"
 readme = "README.md"
 license = "MIT"
