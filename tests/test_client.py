@@ -13,6 +13,7 @@ from mails_agent import (
     Attachment,
     AuthError,
     Email,
+    EmailThread,
     MailsClient,
     MeInfo,
     NotFoundError,
@@ -87,6 +88,22 @@ def _attachment_dict(**overrides: object) -> dict:
         "storage_key": "email-1/att-1",
         "downloadable": True,
         "created_at": "2024-01-01T00:00:00Z",
+    }
+    base.update(overrides)
+    return base
+
+
+def _thread_dict(**overrides: object) -> dict:
+    base = {
+        "thread_id": "thread-1",
+        "latest_email_id": "email-10",
+        "from_address": "sender@example.com",
+        "from_name": "Sender",
+        "subject": "Thread subject",
+        "received_at": "2024-01-01T00:00:00Z",
+        "code": None,
+        "has_attachments": False,
+        "message_count": 3,
     }
     base.update(overrides)
     return base
@@ -757,3 +774,279 @@ class TestAsyncClient:
         emails = await client.get_inbox()
         assert emails == []
         await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_get_threads(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/threads"
+            return httpx.Response(
+                200, json={"threads": [_thread_dict()]}
+            )
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        threads = await client.get_threads()
+        assert len(threads) == 1
+        assert isinstance(threads[0], EmailThread)
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_get_thread(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/thread"
+            return httpx.Response(
+                200,
+                json={"thread_id": "thread-1", "emails": [_email_dict()]},
+            )
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        emails = await client.get_thread("thread-1")
+        assert len(emails) == 1
+        assert isinstance(emails[0], Email)
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_extract(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            assert body["email_id"] == "email-1"
+            assert body["type"] == "order"
+            return httpx.Response(
+                200,
+                json={"email_id": "email-1", "extraction": {"order_number": "ORD-123"}},
+            )
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        result = await client.extract("email-1", "order")
+        assert result["extraction"]["order_number"] == "ORD-123"
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# get_threads()
+# ---------------------------------------------------------------------------
+
+
+class TestGetThreads:
+    def test_get_threads_returns_list(self) -> None:
+        """get_threads() should return a list of EmailThread objects."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/threads"
+            assert request.url.params["to"] == MAILBOX
+            assert request.url.params["limit"] == "20"
+            assert request.url.params["offset"] == "0"
+            return httpx.Response(
+                200,
+                json={"threads": [_thread_dict(), _thread_dict(thread_id="thread-2")]},
+            )
+
+        client = _with_transport(_make_client(), handler)
+        threads = client.get_threads()
+        assert len(threads) == 2
+        assert all(isinstance(t, EmailThread) for t in threads)
+        assert threads[0].thread_id == "thread-1"
+        assert threads[0].latest_email_id == "email-10"
+        assert threads[0].message_count == 3
+        assert threads[1].thread_id == "thread-2"
+
+    def test_get_threads_with_pagination(self) -> None:
+        """get_threads() should pass limit and offset."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["limit"] == "5"
+            assert request.url.params["offset"] == "10"
+            return httpx.Response(200, json={"threads": []})
+
+        client = _with_transport(_make_client(), handler)
+        threads = client.get_threads(limit=5, offset=10)
+        assert threads == []
+
+    def test_get_threads_empty(self) -> None:
+        """get_threads() should handle empty response."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"threads": []})
+
+        client = _with_transport(_make_client(), handler)
+        threads = client.get_threads()
+        assert threads == []
+
+
+# ---------------------------------------------------------------------------
+# get_thread()
+# ---------------------------------------------------------------------------
+
+
+class TestGetThread:
+    def test_get_thread_returns_emails(self) -> None:
+        """get_thread() should return a list of Email objects."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/thread"
+            assert request.url.params["id"] == "thread-1"
+            assert request.url.params["to"] == MAILBOX
+            return httpx.Response(
+                200,
+                json={
+                    "thread_id": "thread-1",
+                    "emails": [
+                        _email_dict(id="email-1", subject="Re: Hello"),
+                        _email_dict(id="email-2", subject="Re: Hello"),
+                    ],
+                },
+            )
+
+        client = _with_transport(_make_client(), handler)
+        emails = client.get_thread("thread-1")
+        assert len(emails) == 2
+        assert all(isinstance(e, Email) for e in emails)
+        assert emails[0].id == "email-1"
+        assert emails[1].id == "email-2"
+
+    def test_get_thread_not_found(self) -> None:
+        """get_thread() should raise NotFoundError for missing threads."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"error": "Thread not found"})
+
+        client = _with_transport(_make_client(), handler)
+        with pytest.raises(NotFoundError):
+            client.get_thread("nonexistent")
+
+
+# ---------------------------------------------------------------------------
+# extract()
+# ---------------------------------------------------------------------------
+
+
+class TestExtract:
+    def test_extract_returns_result(self) -> None:
+        """extract() should POST and return the extraction result."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST"
+            assert request.url.path == "/api/extract"
+            body = json.loads(request.content)
+            assert body["email_id"] == "email-1"
+            assert body["type"] == "order"
+            return httpx.Response(
+                200,
+                json={
+                    "email_id": "email-1",
+                    "extraction": {"order_number": "ORD-123", "total": "$99.99"},
+                },
+            )
+
+        client = _with_transport(_make_client(), handler)
+        result = client.extract("email-1", "order")
+        assert result["email_id"] == "email-1"
+        assert result["extraction"]["order_number"] == "ORD-123"
+
+    def test_extract_invalid_type_raises(self) -> None:
+        """extract() should raise ValueError for invalid type."""
+        client = _make_client()
+        with pytest.raises(ValueError, match="Invalid extraction type"):
+            client.extract("email-1", "invalid")
+
+    def test_extract_all_valid_types(self) -> None:
+        """extract() should accept all valid types."""
+
+        for extract_type in ("order", "shipping", "calendar", "receipt", "code"):
+            def handler(request: httpx.Request) -> httpx.Response:
+                body = json.loads(request.content)
+                assert body["type"] == extract_type
+                return httpx.Response(
+                    200,
+                    json={"email_id": "email-1", "extraction": {}},
+                )
+
+            client = _with_transport(_make_client(), handler)
+            result = client.extract("email-1", extract_type)
+            assert result["email_id"] == "email-1"
+
+
+# ---------------------------------------------------------------------------
+# get_inbox with label
+# ---------------------------------------------------------------------------
+
+
+class TestGetInboxWithLabel:
+    def test_get_inbox_with_label(self) -> None:
+        """get_inbox() should pass the label parameter."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["label"] == "newsletter"
+            return httpx.Response(
+                200, json={"emails": [_email_dict(subject="Weekly digest")]}
+            )
+
+        client = _with_transport(_make_client(), handler)
+        emails = client.get_inbox(label="newsletter")
+        assert len(emails) == 1
+        assert emails[0].subject == "Weekly digest"
+
+    def test_get_inbox_without_label(self) -> None:
+        """get_inbox() should not pass label when not provided."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert "label" not in request.url.params
+            return httpx.Response(200, json={"emails": []})
+
+        client = _with_transport(_make_client(), handler)
+        emails = client.get_inbox()
+        assert emails == []
+
+    def test_search_with_label(self) -> None:
+        """search() should pass the label parameter."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["query"] == "digest"
+            assert request.url.params["label"] == "newsletter"
+            return httpx.Response(200, json={"emails": []})
+
+        client = _with_transport(_make_client(), handler)
+        results = client.search("digest", label="newsletter")
+        assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Hosted mode: threads / thread / extract
+# ---------------------------------------------------------------------------
+
+
+class TestHostedModeNewEndpoints:
+    def test_hosted_get_threads_uses_v1(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/threads"
+            assert "to" not in request.url.params
+            return httpx.Response(200, json={"threads": [_thread_dict()]})
+
+        client = _with_transport(_make_client(hosted=True), handler)
+        threads = client.get_threads()
+        assert len(threads) == 1
+
+    def test_hosted_get_thread_uses_v1(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/thread"
+            assert "to" not in request.url.params
+            return httpx.Response(
+                200,
+                json={"thread_id": "thread-1", "emails": [_email_dict()]},
+            )
+
+        client = _with_transport(_make_client(hosted=True), handler)
+        emails = client.get_thread("thread-1")
+        assert len(emails) == 1
+
+    def test_hosted_extract_uses_v1(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/extract"
+            assert request.method == "POST"
+            return httpx.Response(
+                200,
+                json={"email_id": "email-1", "extraction": {"code": "123456"}},
+            )
+
+        client = _with_transport(_make_client(hosted=True), handler)
+        result = client.extract("email-1", "code")
+        assert result["extraction"]["code"] == "123456"

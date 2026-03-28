@@ -51,6 +51,25 @@ class Email:
     raw_storage_key: Optional[str] = None
     attachments: List[Attachment] = field(default_factory=list)
     created_at: str = ""
+    thread_id: Optional[str] = None
+    in_reply_to: Optional[str] = None
+    references: Optional[str] = None
+    labels: List[str] = field(default_factory=list)
+
+
+@dataclass
+class EmailThread:
+    """Represents a conversation thread."""
+
+    thread_id: str
+    latest_email_id: str
+    subject: str
+    from_address: str
+    from_name: str
+    received_at: str
+    message_count: int
+    has_attachments: bool = False
+    code: Optional[str] = None
 
 
 @dataclass

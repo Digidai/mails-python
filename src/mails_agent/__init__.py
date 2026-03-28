@@ -2,13 +2,14 @@
 
 from .client import AsyncMailsClient, MailsClient
 from .exceptions import ApiError, AuthError, MailsError, NotFoundError
-from .models import Attachment, Email, MeInfo, SendResult, VerificationCode
+from .models import Attachment, Email, EmailThread, MeInfo, SendResult, VerificationCode
 
-__version__ = "1.4.0b2"
+__version__ = "1.5.0"
 __all__ = [
     "MailsClient",
     "AsyncMailsClient",
     "Email",
+    "EmailThread",
     "Attachment",
     "SendResult",
     "VerificationCode",

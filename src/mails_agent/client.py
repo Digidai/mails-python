@@ -7,7 +7,9 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 import httpx
 
 from .exceptions import ApiError, AuthError, NotFoundError
-from .models import Attachment, Email, MeInfo, SendResult, VerificationCode
+from .models import Attachment, Email, EmailThread, MeInfo, SendResult, VerificationCode
+
+_VALID_EXTRACT_TYPES = {"order", "shipping", "calendar", "receipt", "code"}
 
 
 def _parse_attachment(data: Dict[str, Any]) -> Attachment:
@@ -29,6 +31,21 @@ def _parse_attachment(data: Dict[str, Any]) -> Attachment:
     )
 
 
+def _parse_thread(data: Dict[str, Any]) -> EmailThread:
+    """Convert a raw API dict into an EmailThread dataclass."""
+    return EmailThread(
+        thread_id=data["thread_id"],
+        latest_email_id=data["latest_email_id"],
+        subject=data.get("subject", ""),
+        from_address=data.get("from_address", ""),
+        from_name=data.get("from_name", ""),
+        received_at=data.get("received_at", ""),
+        message_count=int(data.get("message_count", 0)),
+        has_attachments=bool(data.get("has_attachments", False)),
+        code=data.get("code"),
+    )
+
+
 def _parse_email(data: Dict[str, Any]) -> Email:
     """Convert a raw API dict into an Email dataclass."""
     raw_attachments = data.get("attachments")
@@ -37,6 +54,8 @@ def _parse_email(data: Dict[str, Any]) -> Email:
         if isinstance(raw_attachments, list)
         else []
     )
+    raw_labels = data.get("labels")
+    labels = list(raw_labels) if isinstance(raw_labels, list) else []
     return Email(
         id=data["id"],
         mailbox=data.get("mailbox", ""),
@@ -60,6 +79,10 @@ def _parse_email(data: Dict[str, Any]) -> Email:
         raw_storage_key=data.get("raw_storage_key"),
         attachments=attachments,
         created_at=data.get("created_at", ""),
+        thread_id=data.get("thread_id"),
+        in_reply_to=data.get("in_reply_to"),
+        references=data.get("references"),
+        labels=labels,
     )
 
 
@@ -194,6 +217,7 @@ class MailsClient:
         offset: int = 0,
         direction: Optional[str] = None,
         query: Optional[str] = None,
+        label: Optional[str] = None,
     ) -> List[Email]:
         """Fetch emails from the inbox.
 
@@ -202,6 +226,7 @@ class MailsClient:
             offset: Pagination offset.
             direction: Filter by ``'inbound'`` or ``'outbound'``.
             query: Optional search query string.
+            label: Optional label filter (e.g. ``'newsletter'``, ``'notification'``).
 
         Returns:
             A list of :class:`Email` objects.
@@ -218,6 +243,8 @@ class MailsClient:
             params["direction"] = direction
         if query is not None:
             params["query"] = query
+        if label is not None:
+            params["label"] = label
 
         response = self._client.get(f"{self._prefix}/inbox", params=params)
         _handle_error(response)
@@ -230,6 +257,7 @@ class MailsClient:
         *,
         limit: int = 20,
         direction: Optional[str] = None,
+        label: Optional[str] = None,
     ) -> List[Email]:
         """Search emails by query string.
 
@@ -237,11 +265,12 @@ class MailsClient:
             query: Search query.
             limit: Maximum number of results.
             direction: Filter by ``'inbound'`` or ``'outbound'``.
+            label: Optional label filter.
 
         Returns:
             A list of matching :class:`Email` objects.
         """
-        return self.get_inbox(query=query, limit=limit, direction=direction)
+        return self.get_inbox(query=query, limit=limit, direction=direction, label=label)
 
     def get_email(self, email_id: str) -> Email:
         """Fetch a single email by ID.
@@ -353,6 +382,76 @@ class MailsClient:
             send=bool(data.get("send", False)),
         )
 
+    def get_threads(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> List[EmailThread]:
+        """Fetch conversation threads.
+
+        Args:
+            limit: Maximum number of threads to return.
+            offset: Pagination offset.
+
+        Returns:
+            A list of :class:`EmailThread` objects.
+        """
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if not self.hosted:
+            params["to"] = self.mailbox
+
+        response = self._client.get(f"{self._prefix}/threads", params=params)
+        _handle_error(response)
+        data = response.json()
+        return [_parse_thread(t) for t in data.get("threads", [])]
+
+    def get_thread(self, thread_id: str) -> List[Email]:
+        """Fetch all emails in a conversation thread.
+
+        Args:
+            thread_id: The thread's unique identifier.
+
+        Returns:
+            A list of :class:`Email` objects in chronological order.
+
+        Raises:
+            NotFoundError: If the thread does not exist.
+        """
+        params: Dict[str, Any] = {"id": thread_id}
+        if not self.hosted:
+            params["to"] = self.mailbox
+
+        response = self._client.get(f"{self._prefix}/thread", params=params)
+        _handle_error(response)
+        data = response.json()
+        return [_parse_email(e) for e in data.get("emails", [])]
+
+    def extract(self, email_id: str, type: str) -> dict:
+        """Extract structured data from an email.
+
+        Args:
+            email_id: The email's unique identifier.
+            type: Extraction type. Must be one of ``'order'``, ``'shipping'``,
+                ``'calendar'``, ``'receipt'``, or ``'code'``.
+
+        Returns:
+            A dict with ``email_id`` and ``extraction`` keys.
+
+        Raises:
+            ValueError: If *type* is not a valid extraction type.
+            NotFoundError: If the email does not exist.
+        """
+        if type not in _VALID_EXTRACT_TYPES:
+            raise ValueError(
+                f"Invalid extraction type {type!r}. "
+                f"Must be one of: {', '.join(sorted(_VALID_EXTRACT_TYPES))}"
+            )
+        payload = {"email_id": email_id, "type": type}
+        response = self._client.post(f"{self._prefix}/extract", json=payload)
+        _handle_error(response)
+        return response.json()
+
 
 # ======================================================================
 # Async client
@@ -453,6 +552,7 @@ class AsyncMailsClient:
         offset: int = 0,
         direction: Optional[str] = None,
         query: Optional[str] = None,
+        label: Optional[str] = None,
     ) -> List[Email]:
         """Fetch emails from the inbox. See :meth:`MailsClient.get_inbox`."""
         params: Dict[str, Any] = {
@@ -465,6 +565,8 @@ class AsyncMailsClient:
             params["direction"] = direction
         if query is not None:
             params["query"] = query
+        if label is not None:
+            params["label"] = label
 
         response = await self._client.get(
             f"{self._prefix}/inbox", params=params
@@ -479,9 +581,10 @@ class AsyncMailsClient:
         *,
         limit: int = 20,
         direction: Optional[str] = None,
+        label: Optional[str] = None,
     ) -> List[Email]:
         """Search emails by query. See :meth:`MailsClient.search`."""
-        return await self.get_inbox(query=query, limit=limit, direction=direction)
+        return await self.get_inbox(query=query, limit=limit, direction=direction, label=label)
 
     async def get_email(self, email_id: str) -> Email:
         """Fetch a single email by ID. See :meth:`MailsClient.get_email`."""
@@ -549,3 +652,48 @@ class AsyncMailsClient:
             mailbox=data.get("mailbox"),
             send=bool(data.get("send", False)),
         )
+
+    async def get_threads(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> List[EmailThread]:
+        """Fetch conversation threads. See :meth:`MailsClient.get_threads`."""
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if not self.hosted:
+            params["to"] = self.mailbox
+
+        response = await self._client.get(
+            f"{self._prefix}/threads", params=params
+        )
+        _handle_error(response)
+        data = response.json()
+        return [_parse_thread(t) for t in data.get("threads", [])]
+
+    async def get_thread(self, thread_id: str) -> List[Email]:
+        """Fetch all emails in a thread. See :meth:`MailsClient.get_thread`."""
+        params: Dict[str, Any] = {"id": thread_id}
+        if not self.hosted:
+            params["to"] = self.mailbox
+
+        response = await self._client.get(
+            f"{self._prefix}/thread", params=params
+        )
+        _handle_error(response)
+        data = response.json()
+        return [_parse_email(e) for e in data.get("emails", [])]
+
+    async def extract(self, email_id: str, type: str) -> dict:
+        """Extract structured data from an email. See :meth:`MailsClient.extract`."""
+        if type not in _VALID_EXTRACT_TYPES:
+            raise ValueError(
+                f"Invalid extraction type {type!r}. "
+                f"Must be one of: {', '.join(sorted(_VALID_EXTRACT_TYPES))}"
+            )
+        payload = {"email_id": email_id, "type": type}
+        response = await self._client.post(
+            f"{self._prefix}/extract", json=payload
+        )
+        _handle_error(response)
+        return response.json()

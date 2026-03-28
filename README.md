@@ -97,7 +97,7 @@ client.send(
 
 ---
 
-### `get_inbox(*, limit=20, offset=0, direction=None, query=None) -> list[Email]`
+### `get_inbox(*, limit=20, offset=0, direction=None, query=None, label=None) -> list[Email]`
 
 Fetch emails from the inbox with optional filtering.
 
@@ -107,16 +107,22 @@ emails = client.get_inbox(limit=10, direction="inbound")
 
 # Search for emails containing "invoice"
 emails = client.get_inbox(query="invoice")
+
+# Filter by label
+emails = client.get_inbox(label="newsletter")
 ```
 
 ---
 
-### `search(query, *, limit=20, direction=None) -> list[Email]`
+### `search(query, *, limit=20, direction=None, label=None) -> list[Email]`
 
 Search emails by query string. Convenience wrapper around `get_inbox`.
 
 ```python
 results = client.search("verification code", limit=5)
+
+# Search within a specific label
+results = client.search("digest", label="newsletter")
 ```
 
 ---
@@ -180,6 +186,48 @@ info = client.get_me()
 print(f"Worker: {info.worker}, Mailbox: {info.mailbox}, Send: {info.send}")
 ```
 
+---
+
+### `get_threads(*, limit=20, offset=0) -> list[EmailThread]`
+
+Fetch conversation threads, grouped by thread ID. Each thread includes the latest email's metadata and a message count.
+
+```python
+threads = client.get_threads(limit=10)
+for thread in threads:
+    print(f"[{thread.message_count} msgs] {thread.subject} — {thread.from_name}")
+```
+
+---
+
+### `get_thread(thread_id) -> list[Email]`
+
+Fetch all emails in a conversation thread, in chronological order. Raises `NotFoundError` if the thread does not exist.
+
+```python
+emails = client.get_thread("thread-abc-123")
+for email in emails:
+    print(f"  {email.from_address}: {email.subject}")
+```
+
+---
+
+### `extract(email_id, type) -> dict`
+
+Extract structured data from an email using server-side parsing. The `type` parameter must be one of: `order`, `shipping`, `calendar`, `receipt`, `code`.
+
+Returns a dict with `email_id` and `extraction` keys.
+
+```python
+result = client.extract("email-123", "order")
+print(result["extraction"])
+# {'order_number': 'ORD-456', 'total': '$99.99', ...}
+
+result = client.extract("email-456", "shipping")
+print(result["extraction"])
+# {'carrier': 'UPS', 'tracking_number': '1Z999...', ...}
+```
+
 ## Async usage
 
 All methods are available as `async` via `AsyncMailsClient`:
@@ -236,9 +284,27 @@ asyncio.run(main())
 | `headers` | `dict` | Email headers |
 | `metadata` | `dict` | Extra metadata |
 | `message_id` | `str \| None` | SMTP Message-ID |
+| `thread_id` | `str \| None` | Conversation thread ID |
+| `in_reply_to` | `str \| None` | In-Reply-To header value |
+| `references` | `str \| None` | References header value |
+| `labels` | `list[str]` | Auto-detected labels (e.g. `newsletter`, `notification`) |
 | `attachments` | `list[Attachment]` | Attachment objects (detail endpoint only) |
 | `attachment_names` | `str` | Comma-separated attachment filenames |
 | `raw_storage_key` | `str \| None` | R2 storage key for raw message |
+
+### `EmailThread`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `thread_id` | `str` | Unique thread ID |
+| `latest_email_id` | `str` | ID of the most recent email in the thread |
+| `subject` | `str` | Subject line |
+| `from_address` | `str` | Sender of the latest email |
+| `from_name` | `str` | Sender display name |
+| `received_at` | `str` | ISO 8601 timestamp of the latest email |
+| `message_count` | `int` | Number of emails in the thread |
+| `has_attachments` | `bool` | Whether the latest email has attachments |
+| `code` | `str \| None` | Extracted verification code, if any |
 
 ### `Attachment`
 
