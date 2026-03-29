@@ -10,6 +10,7 @@ from .exceptions import ApiError, AuthError, NotFoundError
 from .models import Attachment, Email, EmailThread, MeInfo, SendResult, VerificationCode
 
 _VALID_EXTRACT_TYPES = {"order", "shipping", "calendar", "receipt", "code"}
+_VALID_SEARCH_MODES = {"keyword", "semantic", "hybrid"}
 
 
 def _parse_attachment(data: Dict[str, Any]) -> Attachment:
@@ -218,6 +219,7 @@ class MailsClient:
         direction: Optional[str] = None,
         query: Optional[str] = None,
         label: Optional[str] = None,
+        mode: Optional[str] = None,
     ) -> List[Email]:
         """Fetch emails from the inbox.
 
@@ -227,10 +229,20 @@ class MailsClient:
             direction: Filter by ``'inbound'`` or ``'outbound'``.
             query: Optional search query string.
             label: Optional label filter (e.g. ``'newsletter'``, ``'notification'``).
+            mode: Search mode — ``'keyword'``, ``'semantic'``, or ``'hybrid'``.
+                Only meaningful when *query* is provided.
 
         Returns:
             A list of :class:`Email` objects.
+
+        Raises:
+            ValueError: If *mode* is not a valid search mode.
         """
+        if mode is not None and mode not in _VALID_SEARCH_MODES:
+            raise ValueError(
+                f"Invalid search mode {mode!r}. "
+                f"Must be one of: {', '.join(sorted(_VALID_SEARCH_MODES))}"
+            )
         params: Dict[str, Any] = {
             "limit": limit,
             "offset": offset,
@@ -245,6 +257,8 @@ class MailsClient:
             params["query"] = query
         if label is not None:
             params["label"] = label
+        if mode is not None:
+            params["mode"] = mode
 
         response = self._client.get(f"{self._prefix}/inbox", params=params)
         _handle_error(response)
@@ -258,6 +272,7 @@ class MailsClient:
         limit: int = 20,
         direction: Optional[str] = None,
         label: Optional[str] = None,
+        mode: Optional[str] = None,
     ) -> List[Email]:
         """Search emails by query string.
 
@@ -266,11 +281,12 @@ class MailsClient:
             limit: Maximum number of results.
             direction: Filter by ``'inbound'`` or ``'outbound'``.
             label: Optional label filter.
+            mode: Search mode — ``'keyword'``, ``'semantic'``, or ``'hybrid'``.
 
         Returns:
             A list of matching :class:`Email` objects.
         """
-        return self.get_inbox(query=query, limit=limit, direction=direction, label=label)
+        return self.get_inbox(query=query, limit=limit, direction=direction, label=label, mode=mode)
 
     def get_email(self, email_id: str) -> Email:
         """Fetch a single email by ID.
@@ -553,8 +569,14 @@ class AsyncMailsClient:
         direction: Optional[str] = None,
         query: Optional[str] = None,
         label: Optional[str] = None,
+        mode: Optional[str] = None,
     ) -> List[Email]:
         """Fetch emails from the inbox. See :meth:`MailsClient.get_inbox`."""
+        if mode is not None and mode not in _VALID_SEARCH_MODES:
+            raise ValueError(
+                f"Invalid search mode {mode!r}. "
+                f"Must be one of: {', '.join(sorted(_VALID_SEARCH_MODES))}"
+            )
         params: Dict[str, Any] = {
             "limit": limit,
             "offset": offset,
@@ -567,6 +589,8 @@ class AsyncMailsClient:
             params["query"] = query
         if label is not None:
             params["label"] = label
+        if mode is not None:
+            params["mode"] = mode
 
         response = await self._client.get(
             f"{self._prefix}/inbox", params=params
@@ -582,9 +606,10 @@ class AsyncMailsClient:
         limit: int = 20,
         direction: Optional[str] = None,
         label: Optional[str] = None,
+        mode: Optional[str] = None,
     ) -> List[Email]:
         """Search emails by query. See :meth:`MailsClient.search`."""
-        return await self.get_inbox(query=query, limit=limit, direction=direction, label=label)
+        return await self.get_inbox(query=query, limit=limit, direction=direction, label=label, mode=mode)
 
     async def get_email(self, email_id: str) -> Email:
         """Fetch a single email by ID. See :meth:`MailsClient.get_email`."""

@@ -289,6 +289,57 @@ class TestGetInbox:
         emails = client.get_inbox()
         assert emails == []
 
+    def test_get_inbox_with_mode(self) -> None:
+        """get_inbox() should pass the mode parameter."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["mode"] == "semantic"
+            assert request.url.params["query"] == "meeting notes"
+            return httpx.Response(200, json={"emails": [_email_dict()]})
+
+        client = _with_transport(_make_client(), handler)
+        emails = client.get_inbox(query="meeting notes", mode="semantic")
+        assert len(emails) == 1
+
+    def test_get_inbox_without_mode(self) -> None:
+        """get_inbox() should not pass mode when not provided."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert "mode" not in request.url.params
+            return httpx.Response(200, json={"emails": []})
+
+        client = _with_transport(_make_client(), handler)
+        emails = client.get_inbox()
+        assert emails == []
+
+    def test_get_inbox_mode_keyword(self) -> None:
+        """get_inbox() should accept mode='keyword'."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["mode"] == "keyword"
+            return httpx.Response(200, json={"emails": []})
+
+        client = _with_transport(_make_client(), handler)
+        emails = client.get_inbox(query="test", mode="keyword")
+        assert emails == []
+
+    def test_get_inbox_mode_hybrid(self) -> None:
+        """get_inbox() should accept mode='hybrid'."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["mode"] == "hybrid"
+            return httpx.Response(200, json={"emails": []})
+
+        client = _with_transport(_make_client(), handler)
+        emails = client.get_inbox(query="test", mode="hybrid")
+        assert emails == []
+
+    def test_get_inbox_invalid_mode_raises(self) -> None:
+        """get_inbox() should raise ValueError for invalid mode."""
+        client = _make_client()
+        with pytest.raises(ValueError, match="Invalid search mode"):
+            client.get_inbox(query="test", mode="invalid")
+
 
 # ---------------------------------------------------------------------------
 # search()
@@ -310,6 +361,24 @@ class TestSearch:
         results = client.search("code", limit=10)
         assert len(results) == 1
         assert results[0].subject == "Your code is 1234"
+
+    def test_search_with_mode(self) -> None:
+        """search() should pass the mode parameter through to get_inbox."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["query"] == "quarterly report"
+            assert request.url.params["mode"] == "semantic"
+            return httpx.Response(200, json={"emails": [_email_dict()]})
+
+        client = _with_transport(_make_client(), handler)
+        results = client.search("quarterly report", mode="semantic")
+        assert len(results) == 1
+
+    def test_search_invalid_mode_raises(self) -> None:
+        """search() should raise ValueError for invalid mode."""
+        client = _make_client()
+        with pytest.raises(ValueError, match="Invalid search mode"):
+            client.search("test", mode="bad")
 
 
 # ---------------------------------------------------------------------------
@@ -694,6 +763,37 @@ class TestAsyncClient:
         client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
         results = await client.search("test")
         assert results == []
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_get_inbox_with_mode(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["mode"] == "semantic"
+            assert request.url.params["query"] == "meeting"
+            return httpx.Response(200, json={"emails": [_email_dict()]})
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        emails = await client.get_inbox(query="meeting", mode="semantic")
+        assert len(emails) == 1
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_search_with_mode(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["query"] == "report"
+            assert request.url.params["mode"] == "hybrid"
+            return httpx.Response(200, json={"emails": []})
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        results = await client.search("report", mode="hybrid")
+        assert results == []
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_get_inbox_invalid_mode_raises(self) -> None:
+        client = AsyncMailsClient(API_URL, TOKEN, MAILBOX)
+        with pytest.raises(ValueError, match="Invalid search mode"):
+            await client.get_inbox(query="test", mode="invalid")
         await client.close()
 
     @pytest.mark.anyio

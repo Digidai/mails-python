@@ -97,7 +97,7 @@ client.send(
 
 ---
 
-### `get_inbox(*, limit=20, offset=0, direction=None, query=None, label=None) -> list[Email]`
+### `get_inbox(*, limit=20, offset=0, direction=None, query=None, label=None, mode=None) -> list[Email]`
 
 Fetch emails from the inbox with optional filtering.
 
@@ -110,11 +110,25 @@ emails = client.get_inbox(query="invoice")
 
 # Filter by label
 emails = client.get_inbox(label="newsletter")
+
+# Semantic search — find emails by meaning, not just keywords
+emails = client.get_inbox(query="meeting notes from last week", mode="semantic")
+
+# Hybrid search — combine keyword and semantic matching
+emails = client.get_inbox(query="quarterly report", mode="hybrid")
 ```
+
+The `mode` parameter controls the search strategy when `query` is provided:
+
+| Mode | Description |
+|------|-------------|
+| `"keyword"` | Traditional keyword matching (default server behavior) |
+| `"semantic"` | AI-powered semantic search — matches by meaning |
+| `"hybrid"` | Combines keyword and semantic matching for best results |
 
 ---
 
-### `search(query, *, limit=20, direction=None, label=None) -> list[Email]`
+### `search(query, *, limit=20, direction=None, label=None, mode=None) -> list[Email]`
 
 Search emails by query string. Convenience wrapper around `get_inbox`.
 
@@ -123,6 +137,9 @@ results = client.search("verification code", limit=5)
 
 # Search within a specific label
 results = client.search("digest", label="newsletter")
+
+# Semantic search
+results = client.search("emails about project deadlines", mode="semantic")
 ```
 
 ---
