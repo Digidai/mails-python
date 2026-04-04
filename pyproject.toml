@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mails-agent"
-version = "1.6.0"
+version = "1.7.1"
 description = "Python SDK for mails-agent — email capabilities for AI agents"
 readme = "README.md"
 license = "MIT"
@@ -24,5 +24,11 @@ Homepage = "https://mails0.com"
 Repository = "https://github.com/Digidai/mails-python"
 Documentation = "https://github.com/Digidai/mails-python#readme"
 
+[project.optional-dependencies]
+test = ["pytest>=7.0", "anyio[trio]>=3.0", "pytest-anyio>=0.0.0"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/mails_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

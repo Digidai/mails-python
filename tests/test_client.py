@@ -14,11 +14,20 @@ from mails_agent import (
     AuthError,
     Email,
     EmailThread,
+    MailboxStats,
     MailsClient,
+    MailsError,
     MeInfo,
     NotFoundError,
     SendResult,
     VerificationCode,
+)
+from mails_agent.client import (
+    _handle_error,
+    _parse_attachment,
+    _parse_email,
+    _parse_thread,
+    _safe_int,
 )
 
 API_URL = "https://mails-worker.example.com"
@@ -1150,3 +1159,639 @@ class TestHostedModeNewEndpoints:
         client = _with_transport(_make_client(hosted=True), handler)
         result = client.extract("email-1", "code")
         assert result["extraction"]["code"] == "123456"
+
+
+# ---------------------------------------------------------------------------
+# get_stats()
+# ---------------------------------------------------------------------------
+
+
+class TestGetStats:
+    def test_get_stats_returns_stats(self) -> None:
+        """get_stats() should return a MailboxStats object."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/stats"
+            assert request.url.params["to"] == MAILBOX
+            return httpx.Response(
+                200,
+                json={
+                    "mailbox": MAILBOX,
+                    "total_emails": 42,
+                    "inbound": 30,
+                    "outbound": 12,
+                    "emails_this_month": 5,
+                },
+            )
+
+        client = _with_transport(_make_client(), handler)
+        stats = client.get_stats()
+        assert isinstance(stats, MailboxStats)
+        assert stats.mailbox == MAILBOX
+        assert stats.total_emails == 42
+        assert stats.inbound == 30
+        assert stats.outbound == 12
+        assert stats.emails_this_month == 5
+
+    def test_get_stats_hosted_omits_to(self) -> None:
+        """In hosted mode, get_stats() should NOT send ?to= param."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/stats"
+            assert "to" not in request.url.params
+            return httpx.Response(
+                200,
+                json={
+                    "mailbox": MAILBOX,
+                    "total_emails": 10,
+                    "inbound": 8,
+                    "outbound": 2,
+                    "emails_this_month": 1,
+                },
+            )
+
+        client = _with_transport(_make_client(hosted=True), handler)
+        stats = client.get_stats()
+        assert stats.total_emails == 10
+
+    def test_get_stats_handles_missing_fields(self) -> None:
+        """get_stats() should default missing numeric fields to 0."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"mailbox": MAILBOX})
+
+        client = _with_transport(_make_client(), handler)
+        stats = client.get_stats()
+        assert stats.total_emails == 0
+        assert stats.inbound == 0
+        assert stats.outbound == 0
+        assert stats.emails_this_month == 0
+
+    def test_get_stats_auth_error(self) -> None:
+        """get_stats() should raise AuthError on 401."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"error": "Unauthorized"})
+
+        client = _with_transport(_make_client(), handler)
+        with pytest.raises(AuthError):
+            client.get_stats()
+
+
+# ---------------------------------------------------------------------------
+# Helper / parser unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestSafeInt:
+    def test_valid_int(self) -> None:
+        assert _safe_int(42) == 42
+
+    def test_valid_string(self) -> None:
+        assert _safe_int("10") == 10
+
+    def test_none_returns_default(self) -> None:
+        assert _safe_int(None) == 0
+
+    def test_none_with_custom_default(self) -> None:
+        assert _safe_int(None, 99) == 99
+
+    def test_invalid_string_returns_default(self) -> None:
+        assert _safe_int("not_a_number") == 0
+
+    def test_invalid_type_returns_default(self) -> None:
+        assert _safe_int([], 5) == 5
+
+    def test_float_value(self) -> None:
+        assert _safe_int(3.7) == 3
+
+
+class TestParseAttachment:
+    def test_missing_id_raises_api_error(self) -> None:
+        """_parse_attachment should raise ApiError when 'id' is missing."""
+        with pytest.raises(ApiError, match="missing required 'id' field"):
+            _parse_attachment({"filename": "test.txt"})
+
+    def test_minimal_attachment(self) -> None:
+        """_parse_attachment should handle minimal dict with just 'id'."""
+        att = _parse_attachment({"id": "att-min"})
+        assert att.id == "att-min"
+        assert att.filename == ""
+        assert att.email_id == ""
+        assert att.downloadable is False
+
+
+class TestParseThread:
+    def test_missing_thread_id_raises(self) -> None:
+        with pytest.raises(ApiError, match="missing required 'thread_id' field"):
+            _parse_thread({"latest_email_id": "e-1"})
+
+    def test_missing_latest_email_id_raises(self) -> None:
+        with pytest.raises(ApiError, match="missing required 'latest_email_id' field"):
+            _parse_thread({"thread_id": "t-1"})
+
+    def test_minimal_thread(self) -> None:
+        t = _parse_thread({"thread_id": "t-1", "latest_email_id": "e-1"})
+        assert t.thread_id == "t-1"
+        assert t.subject == ""
+        assert t.message_count == 0
+
+
+class TestParseEmail:
+    def test_missing_id_raises(self) -> None:
+        with pytest.raises(ApiError, match="missing required 'id' field"):
+            _parse_email({"subject": "oops"})
+
+    def test_minimal_email(self) -> None:
+        email = _parse_email({"id": "e-min"})
+        assert email.id == "e-min"
+        assert email.mailbox == ""
+        assert email.attachments == []
+        assert email.labels == []
+
+    def test_non_list_attachments_ignored(self) -> None:
+        """If 'attachments' is not a list, it should default to []."""
+        email = _parse_email({"id": "e-1", "attachments": "bad"})
+        assert email.attachments == []
+
+    def test_non_dict_headers_ignored(self) -> None:
+        """If 'headers' is not a dict, it should default to {}."""
+        email = _parse_email({"id": "e-1", "headers": "bad"})
+        assert email.headers == {}
+
+    def test_non_dict_metadata_ignored(self) -> None:
+        """If 'metadata' is not a dict, it should default to {}."""
+        email = _parse_email({"id": "e-1", "metadata": ["bad"]})
+        assert email.metadata == {}
+
+    def test_non_list_labels_ignored(self) -> None:
+        """If 'labels' is not a list, it should default to []."""
+        email = _parse_email({"id": "e-1", "labels": "not-a-list"})
+        assert email.labels == []
+
+
+class TestHandleError:
+    def test_2xx_does_not_raise(self) -> None:
+        """_handle_error should be a no-op for successful responses."""
+        response = httpx.Response(200)
+        _handle_error(response)  # should not raise
+
+    def test_201_does_not_raise(self) -> None:
+        response = httpx.Response(201)
+        _handle_error(response)  # should not raise
+
+    def test_401_raises_auth_error(self) -> None:
+        response = httpx.Response(401)
+        with pytest.raises(AuthError):
+            _handle_error(response)
+
+    def test_403_raises_auth_error(self) -> None:
+        response = httpx.Response(403)
+        with pytest.raises(AuthError):
+            _handle_error(response)
+
+    def test_404_raises_not_found(self) -> None:
+        response = httpx.Response(404)
+        with pytest.raises(NotFoundError):
+            _handle_error(response)
+
+    def test_500_with_json_error_message(self) -> None:
+        response = httpx.Response(
+            500,
+            json={"error": "DB connection failed"},
+        )
+        with pytest.raises(ApiError, match="DB connection failed") as exc_info:
+            _handle_error(response)
+        assert exc_info.value.status_code == 500
+
+    def test_500_with_non_json_body(self) -> None:
+        response = httpx.Response(500, content=b"Internal Server Error")
+        with pytest.raises(ApiError) as exc_info:
+            _handle_error(response)
+        assert exc_info.value.status_code == 500
+
+    def test_429_raises_api_error(self) -> None:
+        response = httpx.Response(429, json={"error": "Rate limited"})
+        with pytest.raises(ApiError, match="Rate limited") as exc_info:
+            _handle_error(response)
+        assert exc_info.value.status_code == 429
+
+
+# ---------------------------------------------------------------------------
+# Exception hierarchy
+# ---------------------------------------------------------------------------
+
+
+class TestExceptionHierarchy:
+    def test_auth_error_is_mails_error(self) -> None:
+        assert issubclass(AuthError, MailsError)
+
+    def test_not_found_error_is_mails_error(self) -> None:
+        assert issubclass(NotFoundError, MailsError)
+
+    def test_api_error_is_mails_error(self) -> None:
+        assert issubclass(ApiError, MailsError)
+
+    def test_api_error_has_status_code(self) -> None:
+        err = ApiError("test", 503)
+        assert err.status_code == 503
+        assert str(err) == "test"
+
+    def test_catch_all_mails_errors(self) -> None:
+        """All SDK exceptions should be catchable via MailsError."""
+        for exc_class in (AuthError, NotFoundError):
+            with pytest.raises(MailsError):
+                raise exc_class("test")
+        with pytest.raises(MailsError):
+            raise ApiError("test", 500)
+
+
+# ---------------------------------------------------------------------------
+# Model dataclass defaults
+# ---------------------------------------------------------------------------
+
+
+class TestModels:
+    def test_email_defaults(self) -> None:
+        email = Email(
+            id="e-1",
+            mailbox="box",
+            from_address="a@b.com",
+            from_name="A",
+            subject="S",
+            direction="inbound",
+            status="received",
+            received_at="2024-01-01",
+        )
+        assert email.has_attachments is False
+        assert email.attachment_count == 0
+        assert email.body_text == ""
+        assert email.body_html == ""
+        assert email.code is None
+        assert email.headers == {}
+        assert email.metadata == {}
+        assert email.attachments == []
+        assert email.labels == []
+        assert email.thread_id is None
+
+    def test_attachment_defaults(self) -> None:
+        att = Attachment(id="a-1", email_id="e-1", filename="f.txt", content_type="text/plain")
+        assert att.size_bytes is None
+        assert att.downloadable is False
+        assert att.mime_part_index == 0
+        assert att.text_extraction_status == "pending"
+
+    def test_send_result_defaults(self) -> None:
+        r = SendResult(id="s-1")
+        assert r.provider == ""
+        assert r.provider_id is None
+
+    def test_verification_code_defaults(self) -> None:
+        vc = VerificationCode(code="123456")
+        assert vc.from_address == ""
+        assert vc.subject == ""
+        assert vc.id is None
+        assert vc.received_at is None
+
+    def test_mailbox_stats_defaults(self) -> None:
+        stats = MailboxStats(mailbox="test@test.com")
+        assert stats.total_emails == 0
+        assert stats.inbound == 0
+        assert stats.outbound == 0
+        assert stats.emails_this_month == 0
+
+    def test_me_info_defaults(self) -> None:
+        info = MeInfo(worker="w")
+        assert info.mailbox is None
+        assert info.send is False
+
+    def test_email_thread_defaults(self) -> None:
+        t = EmailThread(
+            thread_id="t-1",
+            latest_email_id="e-1",
+            subject="S",
+            from_address="a@b.com",
+            from_name="A",
+            received_at="2024-01-01",
+            message_count=1,
+        )
+        assert t.has_attachments is False
+        assert t.code is None
+
+
+# ---------------------------------------------------------------------------
+# Client initialization
+# ---------------------------------------------------------------------------
+
+
+class TestClientInit:
+    def test_api_url_trailing_slash_stripped(self) -> None:
+        """MailsClient should strip trailing slash from api_url."""
+        client = MailsClient("https://example.com/", TOKEN, MAILBOX)
+        assert client.api_url == "https://example.com"
+        client.close()
+
+    def test_async_api_url_trailing_slash_stripped(self) -> None:
+        """AsyncMailsClient should strip trailing slash from api_url."""
+        client = AsyncMailsClient("https://example.com/", TOKEN, MAILBOX)
+        assert client.api_url == "https://example.com"
+
+    def test_default_prefix_is_api(self) -> None:
+        client = _make_client()
+        assert client._prefix == "/api"
+
+    def test_hosted_prefix_is_v1(self) -> None:
+        client = _make_client(hosted=True)
+        assert client._prefix == "/v1"
+
+    def test_client_stores_token(self) -> None:
+        client = _make_client()
+        assert client.token == TOKEN
+
+    def test_client_stores_mailbox(self) -> None:
+        client = _make_client()
+        assert client.mailbox == MAILBOX
+
+
+# ---------------------------------------------------------------------------
+# wait_for_code timeout capping
+# ---------------------------------------------------------------------------
+
+
+class TestWaitForCodeTimeoutCap:
+    def test_timeout_capped_at_300(self) -> None:
+        """wait_for_code should cap timeout at 300 seconds."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["timeout"] == "300"
+            return httpx.Response(200, json={"code": None})
+
+        client = _with_transport(_make_client(), handler)
+        result = client.wait_for_code(timeout=999)
+        assert result is None
+
+    def test_timeout_below_cap_unchanged(self) -> None:
+        """wait_for_code should not alter timeout below 300."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["timeout"] == "120"
+            return httpx.Response(200, json={"code": None})
+
+        client = _with_transport(_make_client(), handler)
+        result = client.wait_for_code(timeout=120)
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Network / connection errors
+# ---------------------------------------------------------------------------
+
+
+class TestNetworkErrors:
+    def test_connect_error_propagates(self) -> None:
+        """Network errors from httpx should propagate as-is."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("Connection refused")
+
+        client = _with_transport(_make_client(), handler)
+        with pytest.raises(httpx.ConnectError):
+            client.get_inbox()
+
+    def test_timeout_error_propagates(self) -> None:
+        """Timeout errors from httpx should propagate as-is."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("Read timed out")
+
+        client = _with_transport(_make_client(), handler)
+        with pytest.raises(httpx.ReadTimeout):
+            client.get_email("email-1")
+
+
+# ---------------------------------------------------------------------------
+# Async get_stats()
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncGetStats:
+    @pytest.mark.anyio
+    async def test_async_get_stats(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/stats"
+            return httpx.Response(
+                200,
+                json={
+                    "mailbox": MAILBOX,
+                    "total_emails": 50,
+                    "inbound": 40,
+                    "outbound": 10,
+                    "emails_this_month": 3,
+                },
+            )
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        stats = await client.get_stats()
+        assert isinstance(stats, MailboxStats)
+        assert stats.total_emails == 50
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_get_stats_hosted(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/stats"
+            assert "to" not in request.url.params
+            return httpx.Response(
+                200,
+                json={"mailbox": MAILBOX, "total_emails": 7},
+            )
+
+        client = _with_transport(
+            AsyncMailsClient(API_URL, TOKEN, MAILBOX, hosted=True), handler
+        )
+        stats = await client.get_stats()
+        assert stats.total_emails == 7
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Async wait_for_code with code found
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncWaitForCodeFound:
+    @pytest.mark.anyio
+    async def test_async_wait_for_code_returns_code(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "id": "email-99",
+                    "code": "654321",
+                    "from": "svc@example.com",
+                    "subject": "Verify",
+                    "received_at": "2024-06-01T00:00:00Z",
+                },
+            )
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        result = await client.wait_for_code()
+        assert result is not None
+        assert result.code == "654321"
+        assert result.from_address == "svc@example.com"
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_wait_for_code_timeout_capped(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["timeout"] == "300"
+            return httpx.Response(200, json={"code": None})
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        result = await client.wait_for_code(timeout=600)
+        assert result is None
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Async delete_email 404
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncDeleteEmail404:
+    @pytest.mark.anyio
+    async def test_async_delete_returns_false_on_404(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"error": "Not found"})
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        assert await client.delete_email("nonexistent") is False
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Async extract validation
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncExtractValidation:
+    @pytest.mark.anyio
+    async def test_async_extract_invalid_type_raises(self) -> None:
+        client = AsyncMailsClient(API_URL, TOKEN, MAILBOX)
+        with pytest.raises(ValueError, match="Invalid extraction type"):
+            await client.extract("email-1", "invalid")
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_extract_all_valid_types(self) -> None:
+        for extract_type in ("order", "shipping", "calendar", "receipt", "code"):
+            def handler(request: httpx.Request) -> httpx.Response:
+                return httpx.Response(
+                    200,
+                    json={"email_id": "email-1", "extraction": {}},
+                )
+
+            client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+            result = await client.extract("email-1", extract_type)
+            assert result["email_id"] == "email-1"
+            await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Async network errors
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncNetworkErrors:
+    @pytest.mark.anyio
+    async def test_async_connect_error_propagates(self) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("Connection refused")
+
+        client = AsyncMailsClient(API_URL, TOKEN, MAILBOX)
+        transport = httpx.MockTransport(handler)
+        client._client = httpx.AsyncClient(
+            base_url=API_URL,
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            transport=transport,
+        )
+        with pytest.raises(httpx.ConnectError):
+            await client.get_inbox()
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Emails with labels parsed correctly
+# ---------------------------------------------------------------------------
+
+
+class TestEmailLabels:
+    def test_email_with_labels(self) -> None:
+        """Emails with labels should be parsed correctly."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json=_full_email_dict(labels=["newsletter", "important"]),
+            )
+
+        client = _with_transport(_make_client(), handler)
+        email = client.get_email("email-1")
+        assert email.labels == ["newsletter", "important"]
+
+    def test_email_thread_fields(self) -> None:
+        """Emails with thread_id, in_reply_to, references should be parsed."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json=_full_email_dict(
+                    thread_id="thread-abc",
+                    in_reply_to="<prev@example.com>",
+                    references="<first@example.com> <prev@example.com>",
+                ),
+            )
+
+        client = _with_transport(_make_client(), handler)
+        email = client.get_email("email-1")
+        assert email.thread_id == "thread-abc"
+        assert email.in_reply_to == "<prev@example.com>"
+        assert email.references == "<first@example.com> <prev@example.com>"
+
+
+# ---------------------------------------------------------------------------
+# get_inbox pagination
+# ---------------------------------------------------------------------------
+
+
+class TestGetInboxPagination:
+    def test_get_inbox_custom_limit_offset(self) -> None:
+        """get_inbox() should pass custom limit and offset."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["limit"] == "5"
+            assert request.url.params["offset"] == "10"
+            return httpx.Response(200, json={"emails": []})
+
+        client = _with_transport(_make_client(), handler)
+        emails = client.get_inbox(limit=5, offset=10)
+        assert emails == []
+
+
+# ---------------------------------------------------------------------------
+# search with direction
+# ---------------------------------------------------------------------------
+
+
+class TestSearchWithDirection:
+    def test_search_with_direction(self) -> None:
+        """search() should pass direction through."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["direction"] == "outbound"
+            assert request.url.params["query"] == "receipt"
+            return httpx.Response(200, json={"emails": []})
+
+        client = _with_transport(_make_client(), handler)
+        results = client.search("receipt", direction="outbound")
+        assert results == []
