@@ -93,6 +93,17 @@ class VerificationCode:
 
 
 @dataclass
+class MailboxStats:
+    """Result of the /api/stats endpoint."""
+
+    mailbox: str
+    total_emails: int = 0
+    inbound: int = 0
+    outbound: int = 0
+    emails_this_month: int = 0
+
+
+@dataclass
 class MeInfo:
     """Result of the /api/me endpoint."""
 

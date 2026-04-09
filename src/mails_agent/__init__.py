@@ -2,7 +2,7 @@
 
 from .client import AsyncMailsClient, MailsClient
 from .exceptions import ApiError, AuthError, MailsError, NotFoundError
-from .models import Attachment, Email, EmailThread, MeInfo, SendResult, VerificationCode
+from .models import Attachment, Email, EmailThread, MailboxStats, MeInfo, SendResult, VerificationCode
 
 __version__ = "1.6.0"
 __all__ = [
@@ -13,6 +13,7 @@ __all__ = [
     "Attachment",
     "SendResult",
     "VerificationCode",
+    "MailboxStats",
     "MeInfo",
     "MailsError",
     "AuthError",

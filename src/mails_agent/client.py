@@ -7,14 +7,26 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 import httpx
 
 from .exceptions import ApiError, AuthError, NotFoundError
-from .models import Attachment, Email, EmailThread, MeInfo, SendResult, VerificationCode
+from .models import Attachment, Email, EmailThread, MailboxStats, MeInfo, SendResult, VerificationCode
 
 _VALID_EXTRACT_TYPES = {"order", "shipping", "calendar", "receipt", "code"}
 _VALID_SEARCH_MODES = {"keyword", "semantic", "hybrid"}
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    """Safely convert a value to int, returning default on failure."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
 def _parse_attachment(data: Dict[str, Any]) -> Attachment:
     """Convert a raw API dict into an Attachment dataclass."""
+    if "id" not in data:
+        raise ApiError(f"Attachment missing required 'id' field: {data!r}", 422)
     return Attachment(
         id=data["id"],
         email_id=data.get("email_id", ""),
@@ -34,6 +46,10 @@ def _parse_attachment(data: Dict[str, Any]) -> Attachment:
 
 def _parse_thread(data: Dict[str, Any]) -> EmailThread:
     """Convert a raw API dict into an EmailThread dataclass."""
+    if "thread_id" not in data:
+        raise ApiError(f"Thread missing required 'thread_id' field: {data!r}", 422)
+    if "latest_email_id" not in data:
+        raise ApiError(f"Thread missing required 'latest_email_id' field: {data!r}", 422)
     return EmailThread(
         thread_id=data["thread_id"],
         latest_email_id=data["latest_email_id"],
@@ -49,6 +65,8 @@ def _parse_thread(data: Dict[str, Any]) -> EmailThread:
 
 def _parse_email(data: Dict[str, Any]) -> Email:
     """Convert a raw API dict into an Email dataclass."""
+    if "id" not in data:
+        raise ApiError(f"Email missing required 'id' field: {data!r}", 422)
     raw_attachments = data.get("attachments")
     attachments = (
         [_parse_attachment(a) for a in raw_attachments]
@@ -324,7 +342,8 @@ class MailsClient:
         Returns:
             A :class:`VerificationCode` if one arrived, or ``None`` on timeout.
         """
-        params: Dict[str, Any] = {"timeout": timeout}
+        capped_timeout = min(timeout, 300)  # Server max is 300s
+        params: Dict[str, Any] = {"timeout": capped_timeout}
         if not self.hosted:
             params["to"] = self.mailbox
         if since is not None:
@@ -334,7 +353,7 @@ class MailsClient:
         response = self._client.get(
             f"{self._prefix}/code",
             params=params,
-            timeout=max(timeout + 10, 60.0),
+            timeout=max(capped_timeout + 10, 60.0),
         )
         _handle_error(response)
         data = response.json()
@@ -396,6 +415,26 @@ class MailsClient:
             worker=data.get("worker", ""),
             mailbox=data.get("mailbox"),
             send=bool(data.get("send", False)),
+        )
+
+    def get_stats(self) -> MailboxStats:
+        """Fetch mailbox statistics.
+
+        Returns:
+            A :class:`MailboxStats` with email counts.
+        """
+        params: Dict[str, Any] = {}
+        if not self.hosted:
+            params["to"] = self.mailbox
+        response = self._client.get(f"{self._prefix}/stats", params=params)
+        _handle_error(response)
+        data = response.json()
+        return MailboxStats(
+            mailbox=data.get("mailbox", self.mailbox),
+            total_emails=_safe_int(data.get("total_emails")),
+            inbound=_safe_int(data.get("inbound")),
+            outbound=_safe_int(data.get("outbound")),
+            emails_this_month=_safe_int(data.get("emails_this_month")),
         )
 
     def get_threads(
@@ -626,7 +665,8 @@ class AsyncMailsClient:
         since: Optional[str] = None,
     ) -> Optional[VerificationCode]:
         """Wait for a verification code. See :meth:`MailsClient.wait_for_code`."""
-        params: Dict[str, Any] = {"timeout": timeout}
+        capped_timeout = min(timeout, 300)
+        params: Dict[str, Any] = {"timeout": capped_timeout}
         if not self.hosted:
             params["to"] = self.mailbox
         if since is not None:
@@ -635,7 +675,7 @@ class AsyncMailsClient:
         response = await self._client.get(
             f"{self._prefix}/code",
             params=params,
-            timeout=max(timeout + 10, 60.0),
+            timeout=max(capped_timeout + 10, 60.0),
         )
         _handle_error(response)
         data = response.json()
@@ -676,6 +716,22 @@ class AsyncMailsClient:
             worker=data.get("worker", ""),
             mailbox=data.get("mailbox"),
             send=bool(data.get("send", False)),
+        )
+
+    async def get_stats(self) -> MailboxStats:
+        """Fetch mailbox statistics. See :meth:`MailsClient.get_stats`."""
+        params: Dict[str, Any] = {}
+        if not self.hosted:
+            params["to"] = self.mailbox
+        response = await self._client.get(f"{self._prefix}/stats", params=params)
+        _handle_error(response)
+        data = response.json()
+        return MailboxStats(
+            mailbox=data.get("mailbox", self.mailbox),
+            total_emails=_safe_int(data.get("total_emails")),
+            inbound=_safe_int(data.get("inbound")),
+            outbound=_safe_int(data.get("outbound")),
+            emails_this_month=_safe_int(data.get("emails_this_month")),
         )
 
     async def get_threads(
