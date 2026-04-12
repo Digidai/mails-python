@@ -245,6 +245,146 @@ print(result["extraction"])
 # {'carrier': 'UPS', 'tracking_number': '1Z999...', ...}
 ```
 
+## Domain management
+
+### `get_domains() -> list[Domain]`
+
+List all custom domains and their verification status.
+
+```python
+domains = client.get_domains()
+for d in domains:
+    print(f"{d.domain}: {d.status} (MX: {d.mx_verified})")
+```
+
+### `add_domain(domain) -> Domain`
+
+Register a new custom domain. Returns DNS records you need to configure.
+
+```python
+domain = client.add_domain("example.com")
+print(domain.instructions)
+for rec in [domain.dns_records.mx, domain.dns_records.spf, domain.dns_records.dmarc]:
+    if rec:
+        print(f"  {rec.type} {rec.host} -> {rec.value}")
+```
+
+### `get_domain(domain_id) -> Domain`
+
+Fetch a domain by ID with its DNS records.
+
+### `verify_domain(domain_id) -> DomainVerification`
+
+Trigger DNS verification. Returns verification results.
+
+```python
+result = client.verify_domain("dom-123")
+print(f"MX: {result.mx_verified}, SPF: {result.spf_verified}")
+print(result.message)
+```
+
+### `delete_domain(domain_id) -> bool`
+
+Delete a custom domain. Returns `True` if deleted, `False` if not found.
+
+---
+
+## Mailbox management
+
+### `get_mailbox() -> Mailbox`
+
+Fetch mailbox info and status.
+
+```python
+mb = client.get_mailbox()
+print(f"Status: {mb.status}, Webhook: {mb.webhook_url}")
+```
+
+### `update_mailbox(*, webhook_url=None) -> Mailbox`
+
+Update mailbox settings (e.g., set a webhook URL for email notifications).
+
+```python
+client.update_mailbox(webhook_url="https://my-app.com/webhook")
+```
+
+### `delete_mailbox() -> MailboxDeleteResult`
+
+Delete the mailbox and all associated data (emails, attachments, R2 blobs).
+
+```python
+result = client.delete_mailbox()
+print(f"Deleted {result.deleted}, cleaned {result.r2_blobs_deleted} blobs")
+```
+
+### `pause_mailbox() -> Mailbox`
+
+Pause the mailbox (stops receiving emails).
+
+### `resume_mailbox() -> Mailbox`
+
+Resume a paused mailbox.
+
+---
+
+## Webhook routes
+
+### `get_webhook_routes() -> WebhookRouteList`
+
+List label-specific webhook routes.
+
+```python
+routes = client.get_webhook_routes()
+for r in routes.routes:
+    print(f"  {r.label} -> {r.webhook_url}")
+```
+
+### `set_webhook_route(label, webhook_url) -> WebhookRoute`
+
+Create or update a webhook route for a specific label.
+
+```python
+client.set_webhook_route("code", "https://my-app.com/codes")
+client.set_webhook_route("newsletter", "https://my-app.com/news")
+```
+
+### `delete_webhook_route(label) -> bool`
+
+Delete a webhook route. Returns `True` if deleted, `False` if not found.
+
+---
+
+## Claim and health
+
+### `claim_mailbox(name) -> ClaimResult`
+
+Claim a new mailbox (headless, no web UI required). Returns the mailbox address and an API key.
+
+```python
+result = client.claim_mailbox("my-agent")
+print(f"Mailbox: {result.mailbox}")
+print(f"API Key: {result.api_key}")
+```
+
+### `health() -> bool`
+
+Check if the Worker is healthy. Returns `True` if reachable, `False` on error.
+
+---
+
+## SSE events
+
+### `get_events(*, mailbox=None, types=None, since=None) -> Iterator[dict]`
+
+Stream real-time events via Server-Sent Events. Each event is a dict with `event` (type) and `data` (parsed JSON) keys.
+
+```python
+for event in client.get_events():
+    print(f"[{event['event']}] {event['data']}")
+```
+
+---
+
 ## Async usage
 
 All methods are available as `async` via `AsyncMailsClient`:
@@ -366,6 +506,64 @@ asyncio.run(main())
 | `worker` | `str` | Worker name |
 | `mailbox` | `str \| None` | Bound mailbox address (if authenticated) |
 | `send` | `bool` | Whether sending is available |
+
+### `Domain`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `str` | Unique domain ID |
+| `domain` | `str` | Domain name |
+| `status` | `str` | Verification status |
+| `mx_verified` | `bool` | MX record verified |
+| `spf_verified` | `bool` | SPF record verified |
+| `dkim_verified` | `bool` | DKIM record verified |
+| `created_at` | `str` | ISO 8601 timestamp |
+| `verified_at` | `str \| None` | When domain was verified |
+| `dns_records` | `DnsRecords \| None` | Required DNS records |
+| `instructions` | `str \| None` | Setup instructions |
+
+### `DomainVerification`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `str` | Domain ID |
+| `domain` | `str` | Domain name |
+| `status` | `str` | Verification status |
+| `mx_verified` | `bool` | MX record verified |
+| `spf_verified` | `bool` | SPF record verified |
+| `message` | `str` | Verification result message |
+
+### `Mailbox`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `mailbox` | `str` | Mailbox address |
+| `status` | `str` | `"active"` or `"paused"` |
+| `webhook_url` | `str \| None` | Webhook URL for notifications |
+| `created_at` | `str` | ISO 8601 timestamp |
+
+### `MailboxDeleteResult`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ok` | `bool` | Whether deletion succeeded |
+| `deleted` | `str` | Deleted mailbox address |
+| `r2_blobs_deleted` | `int` | Number of R2 blobs cleaned up |
+
+### `WebhookRoute`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `label` | `str` | Email label (e.g. `"code"`, `"newsletter"`) |
+| `webhook_url` | `str` | Webhook URL |
+| `created_at` | `str` | ISO 8601 timestamp |
+
+### `ClaimResult`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `mailbox` | `str` | Claimed mailbox address |
+| `api_key` | `str` | API key for the new mailbox |
 
 ## Exceptions
 

@@ -110,3 +110,115 @@ class MeInfo:
     worker: str
     mailbox: Optional[str] = None
     send: bool = False
+
+
+# ------------------------------------------------------------------
+# Domain management
+# ------------------------------------------------------------------
+
+
+@dataclass
+class DnsRecord:
+    """A single DNS record required for domain verification."""
+
+    type: str
+    host: str
+    value: str
+    purpose: str
+    priority: Optional[int] = None
+
+
+@dataclass
+class DnsRecords:
+    """DNS records required for a custom domain."""
+
+    mx: Optional[DnsRecord] = None
+    spf: Optional[DnsRecord] = None
+    dmarc: Optional[DnsRecord] = None
+
+
+@dataclass
+class Domain:
+    """A custom email domain."""
+
+    id: str
+    domain: str
+    status: str
+    mx_verified: bool = False
+    spf_verified: bool = False
+    dkim_verified: bool = False
+    created_at: str = ""
+    verified_at: Optional[str] = None
+    dns_records: Optional[DnsRecords] = None
+    instructions: Optional[str] = None
+
+
+@dataclass
+class DomainVerification:
+    """Result of a domain verification check."""
+
+    id: str
+    domain: str
+    status: str
+    mx_verified: bool = False
+    spf_verified: bool = False
+    message: str = ""
+
+
+# ------------------------------------------------------------------
+# Mailbox management
+# ------------------------------------------------------------------
+
+
+@dataclass
+class Mailbox:
+    """Mailbox info and status."""
+
+    mailbox: str
+    status: str = ""
+    webhook_url: Optional[str] = None
+    created_at: str = ""
+
+
+@dataclass
+class MailboxDeleteResult:
+    """Result of deleting a mailbox."""
+
+    ok: bool
+    deleted: str = ""
+    r2_blobs_deleted: int = 0
+
+
+# ------------------------------------------------------------------
+# Webhook routes
+# ------------------------------------------------------------------
+
+
+@dataclass
+class WebhookRoute:
+    """A label-specific webhook route."""
+
+    label: str
+    webhook_url: str
+    created_at: str = ""
+
+
+@dataclass
+class WebhookRouteList:
+    """Response from listing webhook routes."""
+
+    mailbox: str
+    routes: List["WebhookRoute"] = field(default_factory=list)
+
+
+# ------------------------------------------------------------------
+# Claim
+# ------------------------------------------------------------------
+
+
+@dataclass
+class ClaimResult:
+    """Result of claiming a new mailbox."""
+
+    mailbox: str
+    api_key: str

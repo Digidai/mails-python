@@ -2,15 +2,34 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Union
+import json
+from typing import Any, AsyncIterator, Dict, Generator, Iterator, List, Optional, Sequence, Union
 
 import httpx
 
 from .exceptions import ApiError, AuthError, NotFoundError
-from .models import Attachment, Email, EmailThread, MailboxStats, MeInfo, SendResult, VerificationCode
+from .models import (
+    Attachment,
+    ClaimResult,
+    DnsRecord,
+    DnsRecords,
+    Domain,
+    DomainVerification,
+    Email,
+    EmailThread,
+    Mailbox,
+    MailboxDeleteResult,
+    MailboxStats,
+    MeInfo,
+    SendResult,
+    VerificationCode,
+    WebhookRoute,
+    WebhookRouteList,
+)
 
 _VALID_EXTRACT_TYPES = {"order", "shipping", "calendar", "receipt", "code"}
 _VALID_SEARCH_MODES = {"keyword", "semantic", "hybrid"}
+_UNSET = object()  # Sentinel to distinguish "not provided" from None
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -102,6 +121,53 @@ def _parse_email(data: Dict[str, Any]) -> Email:
         in_reply_to=data.get("in_reply_to"),
         references=data.get("references"),
         labels=labels,
+    )
+
+
+def _parse_dns_record(data: Dict[str, Any]) -> DnsRecord:
+    """Convert a raw API dict into a DnsRecord dataclass."""
+    return DnsRecord(
+        type=data.get("type", ""),
+        host=data.get("host", ""),
+        value=data.get("value", ""),
+        purpose=data.get("purpose", ""),
+        priority=data.get("priority"),
+    )
+
+
+def _parse_dns_records(data: Optional[Dict[str, Any]]) -> Optional[DnsRecords]:
+    """Convert a raw API dict into a DnsRecords dataclass."""
+    if not data or not isinstance(data, dict):
+        return None
+    return DnsRecords(
+        mx=_parse_dns_record(data["mx"]) if "mx" in data else None,
+        spf=_parse_dns_record(data["spf"]) if "spf" in data else None,
+        dmarc=_parse_dns_record(data["dmarc"]) if "dmarc" in data else None,
+    )
+
+
+def _parse_domain(data: Dict[str, Any]) -> Domain:
+    """Convert a raw API dict into a Domain dataclass."""
+    return Domain(
+        id=data.get("id", ""),
+        domain=data.get("domain", ""),
+        status=data.get("status", ""),
+        mx_verified=bool(data.get("mx_verified", False)),
+        spf_verified=bool(data.get("spf_verified", False)),
+        dkim_verified=bool(data.get("dkim_verified", False)),
+        created_at=data.get("created_at", ""),
+        verified_at=data.get("verified_at"),
+        dns_records=_parse_dns_records(data.get("dns_records")),
+        instructions=data.get("instructions"),
+    )
+
+
+def _parse_webhook_route(data: Dict[str, Any]) -> WebhookRoute:
+    """Convert a raw API dict into a WebhookRoute dataclass."""
+    return WebhookRoute(
+        label=data.get("label", ""),
+        webhook_url=data.get("webhook_url", ""),
+        created_at=data.get("created_at", ""),
     )
 
 
@@ -507,6 +573,325 @@ class MailsClient:
         _handle_error(response)
         return response.json()
 
+    # ------------------------------------------------------------------
+    # Domain management
+    # ------------------------------------------------------------------
+
+    def get_domains(self) -> List[Domain]:
+        """List all custom domains.
+
+        Returns:
+            A list of :class:`Domain` objects.
+        """
+        response = self._client.get(f"{self._prefix}/domains")
+        _handle_error(response)
+        data = response.json()
+        return [_parse_domain(d) for d in data.get("domains", [])]
+
+    def add_domain(self, domain: str) -> Domain:
+        """Register a new custom domain.
+
+        Args:
+            domain: The domain name to register (e.g. ``'example.com'``).
+
+        Returns:
+            A :class:`Domain` with DNS records and setup instructions.
+        """
+        response = self._client.post(
+            f"{self._prefix}/domains", json={"domain": domain}
+        )
+        _handle_error(response)
+        return _parse_domain(response.json())
+
+    def get_domain(self, domain_id: str) -> Domain:
+        """Fetch a domain by ID.
+
+        Args:
+            domain_id: The domain's unique identifier.
+
+        Returns:
+            A :class:`Domain` with DNS records.
+
+        Raises:
+            NotFoundError: If the domain does not exist.
+        """
+        response = self._client.get(f"{self._prefix}/domains/{domain_id}")
+        _handle_error(response)
+        return _parse_domain(response.json())
+
+    def verify_domain(self, domain_id: str) -> DomainVerification:
+        """Trigger DNS verification for a domain.
+
+        Args:
+            domain_id: The domain's unique identifier.
+
+        Returns:
+            A :class:`DomainVerification` with verification results.
+        """
+        response = self._client.post(
+            f"{self._prefix}/domains/{domain_id}/verify"
+        )
+        _handle_error(response)
+        data = response.json()
+        return DomainVerification(
+            id=data.get("id", ""),
+            domain=data.get("domain", ""),
+            status=data.get("status", ""),
+            mx_verified=bool(data.get("mx_verified", False)),
+            spf_verified=bool(data.get("spf_verified", False)),
+            message=data.get("message", ""),
+        )
+
+    def delete_domain(self, domain_id: str) -> bool:
+        """Delete a custom domain.
+
+        Args:
+            domain_id: The domain's unique identifier.
+
+        Returns:
+            ``True`` if deleted successfully.
+        """
+        response = self._client.delete(f"{self._prefix}/domains/{domain_id}")
+        if response.status_code == 404:
+            return False
+        _handle_error(response)
+        return True
+
+    # ------------------------------------------------------------------
+    # Mailbox management
+    # ------------------------------------------------------------------
+
+    def get_mailbox(self) -> Mailbox:
+        """Fetch mailbox info and status.
+
+        Returns:
+            A :class:`Mailbox` with status and webhook configuration.
+        """
+        response = self._client.get(f"{self._prefix}/mailbox")
+        _handle_error(response)
+        data = response.json()
+        return Mailbox(
+            mailbox=data.get("mailbox", ""),
+            status=data.get("status", ""),
+            webhook_url=data.get("webhook_url"),
+            created_at=data.get("created_at", ""),
+        )
+
+    def update_mailbox(
+        self, *, webhook_url: Union[Optional[str], object] = _UNSET
+    ) -> Mailbox:
+        """Update mailbox settings.
+
+        Args:
+            webhook_url: Webhook URL for email notifications. Pass ``None``
+                to clear the webhook. Omit to leave unchanged.
+
+        Returns:
+            Updated :class:`Mailbox`.
+        """
+        payload: Dict[str, Any] = {}
+        if webhook_url is not _UNSET:
+            payload["webhook_url"] = webhook_url
+        response = self._client.patch(
+            f"{self._prefix}/mailbox", json=payload
+        )
+        _handle_error(response)
+        data = response.json()
+        return Mailbox(
+            mailbox=data.get("mailbox", ""),
+            status=data.get("status", ""),
+            webhook_url=data.get("webhook_url"),
+            created_at=data.get("created_at", ""),
+        )
+
+    def delete_mailbox(self) -> MailboxDeleteResult:
+        """Delete the mailbox and all associated data.
+
+        Returns:
+            A :class:`MailboxDeleteResult` with cleanup details.
+        """
+        response = self._client.delete(f"{self._prefix}/mailbox")
+        _handle_error(response)
+        data = response.json()
+        return MailboxDeleteResult(
+            ok=bool(data.get("ok", False)),
+            deleted=data.get("deleted", ""),
+            r2_blobs_deleted=_safe_int(data.get("r2_blobs_deleted")),
+        )
+
+    def pause_mailbox(self) -> Mailbox:
+        """Pause the mailbox (stops receiving emails).
+
+        Returns:
+            Updated :class:`Mailbox` with ``status='paused'``.
+        """
+        response = self._client.patch(f"{self._prefix}/mailbox/pause")
+        _handle_error(response)
+        data = response.json()
+        return Mailbox(
+            mailbox=data.get("mailbox", ""),
+            status=data.get("status", ""),
+        )
+
+    def resume_mailbox(self) -> Mailbox:
+        """Resume the mailbox (start receiving emails again).
+
+        Returns:
+            Updated :class:`Mailbox` with ``status='active'``.
+        """
+        response = self._client.patch(f"{self._prefix}/mailbox/resume")
+        _handle_error(response)
+        data = response.json()
+        return Mailbox(
+            mailbox=data.get("mailbox", ""),
+            status=data.get("status", ""),
+        )
+
+    # ------------------------------------------------------------------
+    # Webhook routes
+    # ------------------------------------------------------------------
+
+    def get_webhook_routes(self) -> WebhookRouteList:
+        """List label-specific webhook routes.
+
+        Returns:
+            A :class:`WebhookRouteList` with all configured routes.
+        """
+        response = self._client.get(f"{self._prefix}/mailbox/routes")
+        _handle_error(response)
+        data = response.json()
+        return WebhookRouteList(
+            mailbox=data.get("mailbox", ""),
+            routes=[_parse_webhook_route(r) for r in data.get("routes", [])],
+        )
+
+    def set_webhook_route(self, label: str, webhook_url: str) -> WebhookRoute:
+        """Create or update a webhook route for a label.
+
+        Args:
+            label: The email label (e.g. ``'code'``, ``'newsletter'``,
+                ``'notification'``, ``'personal'``).
+            webhook_url: The URL to receive webhook notifications.
+
+        Returns:
+            The created/updated :class:`WebhookRoute`.
+        """
+        response = self._client.put(
+            f"{self._prefix}/mailbox/routes",
+            json={"label": label, "webhook_url": webhook_url},
+        )
+        _handle_error(response)
+        data = response.json()
+        return WebhookRoute(
+            label=data.get("label", ""),
+            webhook_url=data.get("webhook_url", ""),
+        )
+
+    def delete_webhook_route(self, label: str) -> bool:
+        """Delete a webhook route for a label.
+
+        Args:
+            label: The label whose route should be deleted.
+
+        Returns:
+            ``True`` if deleted, ``False`` if not found.
+        """
+        response = self._client.delete(
+            f"{self._prefix}/mailbox/routes", params={"label": label}
+        )
+        if response.status_code == 404:
+            return False
+        _handle_error(response)
+        return True
+
+    # ------------------------------------------------------------------
+    # Claim and health
+    # ------------------------------------------------------------------
+
+    def claim_mailbox(self, name: str) -> ClaimResult:
+        """Claim a new mailbox (headless, no web UI required).
+
+        Args:
+            name: The desired mailbox name (e.g. ``'my-agent'``).
+
+        Returns:
+            A :class:`ClaimResult` with the mailbox address and API key.
+        """
+        response = self._client.post(
+            f"{self._prefix}/claim/auto", json={"name": name}
+        )
+        _handle_error(response)
+        data = response.json()
+        return ClaimResult(
+            mailbox=data.get("mailbox", ""),
+            api_key=data.get("api_key", ""),
+        )
+
+    # ------------------------------------------------------------------
+    # SSE Events
+    # ------------------------------------------------------------------
+
+    def get_events(
+        self,
+        *,
+        mailbox: Optional[str] = None,
+        types: Optional[str] = None,
+        since: Optional[str] = None,
+    ) -> Iterator[Dict[str, Any]]:
+        """Stream real-time events via Server-Sent Events.
+
+        Yields parsed event dicts. Each dict has ``event`` (event type)
+        and ``data`` (parsed JSON payload) keys.
+
+        Args:
+            mailbox: Filter events to a specific mailbox.
+            types: Comma-separated event types to subscribe to.
+            since: Only receive events after this ISO 8601 timestamp.
+
+        Yields:
+            Dicts with ``event`` and ``data`` keys.
+        """
+        params: Dict[str, Any] = {}
+        if mailbox is not None:
+            params["mailbox"] = mailbox
+        if types is not None:
+            params["types"] = types
+        if since is not None:
+            params["since"] = since
+
+        with self._client.stream(
+            "GET", f"{self._prefix}/events", params=params
+        ) as response:
+            _handle_error(response)
+            event_type = "message"
+            data_lines: List[str] = []
+            for line in response.iter_lines():
+                if line.startswith("event:"):
+                    event_type = line[6:].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line[5:].strip())
+                elif line == "" and data_lines:
+                    raw = "\n".join(data_lines)
+                    try:
+                        parsed = json.loads(raw)
+                    except (ValueError, TypeError):
+                        parsed = raw
+                    yield {"event": event_type, "data": parsed}
+                    event_type = "message"
+                    data_lines = []
+
+    def health(self) -> bool:
+        """Check if the Worker is healthy.
+
+        Returns:
+            ``True`` if the server responds, ``False`` on error.
+        """
+        try:
+            response = self._client.get("/health")
+            return response.status_code == 200
+        except Exception:
+            return False
+
 
 # ======================================================================
 # Async client
@@ -778,3 +1163,220 @@ class AsyncMailsClient:
         )
         _handle_error(response)
         return response.json()
+
+    # ------------------------------------------------------------------
+    # Domain management
+    # ------------------------------------------------------------------
+
+    async def get_domains(self) -> List[Domain]:
+        """List all custom domains. See :meth:`MailsClient.get_domains`."""
+        response = await self._client.get(f"{self._prefix}/domains")
+        _handle_error(response)
+        data = response.json()
+        return [_parse_domain(d) for d in data.get("domains", [])]
+
+    async def add_domain(self, domain: str) -> Domain:
+        """Register a new custom domain. See :meth:`MailsClient.add_domain`."""
+        response = await self._client.post(
+            f"{self._prefix}/domains", json={"domain": domain}
+        )
+        _handle_error(response)
+        return _parse_domain(response.json())
+
+    async def get_domain(self, domain_id: str) -> Domain:
+        """Fetch a domain by ID. See :meth:`MailsClient.get_domain`."""
+        response = await self._client.get(f"{self._prefix}/domains/{domain_id}")
+        _handle_error(response)
+        return _parse_domain(response.json())
+
+    async def verify_domain(self, domain_id: str) -> DomainVerification:
+        """Trigger DNS verification. See :meth:`MailsClient.verify_domain`."""
+        response = await self._client.post(
+            f"{self._prefix}/domains/{domain_id}/verify"
+        )
+        _handle_error(response)
+        data = response.json()
+        return DomainVerification(
+            id=data.get("id", ""),
+            domain=data.get("domain", ""),
+            status=data.get("status", ""),
+            mx_verified=bool(data.get("mx_verified", False)),
+            spf_verified=bool(data.get("spf_verified", False)),
+            message=data.get("message", ""),
+        )
+
+    async def delete_domain(self, domain_id: str) -> bool:
+        """Delete a custom domain. See :meth:`MailsClient.delete_domain`."""
+        response = await self._client.delete(f"{self._prefix}/domains/{domain_id}")
+        if response.status_code == 404:
+            return False
+        _handle_error(response)
+        return True
+
+    # ------------------------------------------------------------------
+    # Mailbox management
+    # ------------------------------------------------------------------
+
+    async def get_mailbox(self) -> Mailbox:
+        """Fetch mailbox info. See :meth:`MailsClient.get_mailbox`."""
+        response = await self._client.get(f"{self._prefix}/mailbox")
+        _handle_error(response)
+        data = response.json()
+        return Mailbox(
+            mailbox=data.get("mailbox", ""),
+            status=data.get("status", ""),
+            webhook_url=data.get("webhook_url"),
+            created_at=data.get("created_at", ""),
+        )
+
+    async def update_mailbox(
+        self, *, webhook_url: Union[Optional[str], object] = _UNSET
+    ) -> Mailbox:
+        """Update mailbox settings. See :meth:`MailsClient.update_mailbox`."""
+        payload: Dict[str, Any] = {}
+        if webhook_url is not _UNSET:
+            payload["webhook_url"] = webhook_url
+        response = await self._client.patch(
+            f"{self._prefix}/mailbox", json=payload
+        )
+        _handle_error(response)
+        data = response.json()
+        return Mailbox(
+            mailbox=data.get("mailbox", ""),
+            status=data.get("status", ""),
+            webhook_url=data.get("webhook_url"),
+            created_at=data.get("created_at", ""),
+        )
+
+    async def delete_mailbox(self) -> MailboxDeleteResult:
+        """Delete the mailbox. See :meth:`MailsClient.delete_mailbox`."""
+        response = await self._client.delete(f"{self._prefix}/mailbox")
+        _handle_error(response)
+        data = response.json()
+        return MailboxDeleteResult(
+            ok=bool(data.get("ok", False)),
+            deleted=data.get("deleted", ""),
+            r2_blobs_deleted=_safe_int(data.get("r2_blobs_deleted")),
+        )
+
+    async def pause_mailbox(self) -> Mailbox:
+        """Pause the mailbox. See :meth:`MailsClient.pause_mailbox`."""
+        response = await self._client.patch(f"{self._prefix}/mailbox/pause")
+        _handle_error(response)
+        data = response.json()
+        return Mailbox(
+            mailbox=data.get("mailbox", ""),
+            status=data.get("status", ""),
+        )
+
+    async def resume_mailbox(self) -> Mailbox:
+        """Resume the mailbox. See :meth:`MailsClient.resume_mailbox`."""
+        response = await self._client.patch(f"{self._prefix}/mailbox/resume")
+        _handle_error(response)
+        data = response.json()
+        return Mailbox(
+            mailbox=data.get("mailbox", ""),
+            status=data.get("status", ""),
+        )
+
+    # ------------------------------------------------------------------
+    # Webhook routes
+    # ------------------------------------------------------------------
+
+    async def get_webhook_routes(self) -> WebhookRouteList:
+        """List webhook routes. See :meth:`MailsClient.get_webhook_routes`."""
+        response = await self._client.get(f"{self._prefix}/mailbox/routes")
+        _handle_error(response)
+        data = response.json()
+        return WebhookRouteList(
+            mailbox=data.get("mailbox", ""),
+            routes=[_parse_webhook_route(r) for r in data.get("routes", [])],
+        )
+
+    async def set_webhook_route(self, label: str, webhook_url: str) -> WebhookRoute:
+        """Create/update a webhook route. See :meth:`MailsClient.set_webhook_route`."""
+        response = await self._client.put(
+            f"{self._prefix}/mailbox/routes",
+            json={"label": label, "webhook_url": webhook_url},
+        )
+        _handle_error(response)
+        data = response.json()
+        return WebhookRoute(
+            label=data.get("label", ""),
+            webhook_url=data.get("webhook_url", ""),
+        )
+
+    async def delete_webhook_route(self, label: str) -> bool:
+        """Delete a webhook route. See :meth:`MailsClient.delete_webhook_route`."""
+        response = await self._client.delete(
+            f"{self._prefix}/mailbox/routes", params={"label": label}
+        )
+        if response.status_code == 404:
+            return False
+        _handle_error(response)
+        return True
+
+    # ------------------------------------------------------------------
+    # Claim and health
+    # ------------------------------------------------------------------
+
+    async def claim_mailbox(self, name: str) -> ClaimResult:
+        """Claim a new mailbox. See :meth:`MailsClient.claim_mailbox`."""
+        response = await self._client.post(
+            f"{self._prefix}/claim/auto", json={"name": name}
+        )
+        _handle_error(response)
+        data = response.json()
+        return ClaimResult(
+            mailbox=data.get("mailbox", ""),
+            api_key=data.get("api_key", ""),
+        )
+
+    async def health(self) -> bool:
+        """Check if the Worker is healthy. See :meth:`MailsClient.health`."""
+        try:
+            response = await self._client.get("/health")
+            return response.status_code == 200
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------------
+    # SSE Events
+    # ------------------------------------------------------------------
+
+    async def get_events(
+        self,
+        *,
+        mailbox: Optional[str] = None,
+        types: Optional[str] = None,
+        since: Optional[str] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Stream real-time events via SSE. See :meth:`MailsClient.get_events`."""
+        params: Dict[str, Any] = {}
+        if mailbox is not None:
+            params["mailbox"] = mailbox
+        if types is not None:
+            params["types"] = types
+        if since is not None:
+            params["since"] = since
+
+        async with self._client.stream(
+            "GET", f"{self._prefix}/events", params=params
+        ) as response:
+            _handle_error(response)
+            event_type = "message"
+            data_lines: List[str] = []
+            async for line in response.aiter_lines():
+                if line.startswith("event:"):
+                    event_type = line[6:].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line[5:].strip())
+                elif line == "" and data_lines:
+                    raw = "\n".join(data_lines)
+                    try:
+                        parsed = json.loads(raw)
+                    except (ValueError, TypeError):
+                        parsed = raw
+                    yield {"event": event_type, "data": parsed}
+                    event_type = "message"
+                    data_lines = []

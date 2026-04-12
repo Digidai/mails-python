@@ -1795,3 +1795,718 @@ class TestSearchWithDirection:
         client = _with_transport(_make_client(), handler)
         results = client.search("receipt", direction="outbound")
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Domain management
+# ---------------------------------------------------------------------------
+
+from mails_agent import (
+    ClaimResult,
+    DnsRecord,
+    DnsRecords,
+    Domain,
+    DomainVerification,
+    Mailbox,
+    MailboxDeleteResult,
+    WebhookRoute,
+    WebhookRouteList,
+)
+from mails_agent.client import _parse_domain, _parse_dns_records, _parse_webhook_route
+
+
+def _domain_dict(**overrides: object) -> dict:
+    base = {
+        "id": "dom-1",
+        "domain": "example.com",
+        "status": "pending",
+        "mx_verified": False,
+        "spf_verified": False,
+        "dkim_verified": False,
+        "created_at": "2024-01-01T00:00:00Z",
+        "verified_at": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def _domain_with_dns(**overrides: object) -> dict:
+    d = _domain_dict(**overrides)
+    d["dns_records"] = {
+        "mx": {"type": "MX", "host": "@", "value": "mx.example.com", "priority": 10, "purpose": "Email routing"},
+        "spf": {"type": "TXT", "host": "@", "value": "v=spf1 include:example.com ~all", "purpose": "SPF"},
+        "dmarc": {"type": "TXT", "host": "_dmarc", "value": "v=DMARC1; p=none", "purpose": "DMARC"},
+    }
+    d["instructions"] = "Add the DNS records below."
+    return d
+
+
+class TestGetDomains:
+    def test_get_domains(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/domains"
+            return httpx.Response(200, json={"domains": [_domain_dict(), _domain_dict(id="dom-2", domain="other.com")]})
+
+        client = _with_transport(_make_client(), handler)
+        domains = client.get_domains()
+        assert len(domains) == 2
+        assert isinstance(domains[0], Domain)
+        assert domains[0].id == "dom-1"
+        assert domains[1].domain == "other.com"
+
+    def test_get_domains_empty(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"domains": []})
+
+        client = _with_transport(_make_client(), handler)
+        assert client.get_domains() == []
+
+
+class TestAddDomain:
+    def test_add_domain(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/domains"
+            body = json.loads(request.content)
+            assert body["domain"] == "new.com"
+            return httpx.Response(200, json=_domain_with_dns(id="dom-new", domain="new.com"))
+
+        client = _with_transport(_make_client(), handler)
+        domain = client.add_domain("new.com")
+        assert isinstance(domain, Domain)
+        assert domain.domain == "new.com"
+        assert domain.dns_records is not None
+        assert domain.dns_records.mx is not None
+        assert domain.dns_records.mx.priority == 10
+        assert domain.instructions == "Add the DNS records below."
+
+
+class TestGetDomain:
+    def test_get_domain(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/domains/dom-1"
+            return httpx.Response(200, json=_domain_with_dns())
+
+        client = _with_transport(_make_client(), handler)
+        domain = client.get_domain("dom-1")
+        assert domain.id == "dom-1"
+        assert domain.dns_records is not None
+        assert domain.dns_records.spf is not None
+
+    def test_get_domain_not_found(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"error": "Not found"})
+
+        client = _with_transport(_make_client(), handler)
+        with pytest.raises(NotFoundError):
+            client.get_domain("nope")
+
+
+class TestVerifyDomain:
+    def test_verify_domain(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/domains/dom-1/verify"
+            assert request.method == "POST"
+            return httpx.Response(200, json={
+                "id": "dom-1", "domain": "example.com", "status": "verified",
+                "mx_verified": True, "spf_verified": True, "message": "All records verified",
+            })
+
+        client = _with_transport(_make_client(), handler)
+        result = client.verify_domain("dom-1")
+        assert isinstance(result, DomainVerification)
+        assert result.mx_verified is True
+        assert result.message == "All records verified"
+
+
+class TestDeleteDomain:
+    def test_delete_domain(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/domains/dom-1"
+            assert request.method == "DELETE"
+            return httpx.Response(200, json={"ok": True})
+
+        client = _with_transport(_make_client(), handler)
+        assert client.delete_domain("dom-1") is True
+
+    def test_delete_domain_not_found(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"error": "Not found"})
+
+        client = _with_transport(_make_client(), handler)
+        assert client.delete_domain("nope") is False
+
+
+# ---------------------------------------------------------------------------
+# Mailbox management
+# ---------------------------------------------------------------------------
+
+
+class TestGetMailbox:
+    def test_get_mailbox(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/mailbox"
+            return httpx.Response(200, json={
+                "mailbox": MAILBOX, "status": "active",
+                "webhook_url": "https://hook.example.com", "created_at": "2024-01-01T00:00:00Z",
+            })
+
+        client = _with_transport(_make_client(), handler)
+        mb = client.get_mailbox()
+        assert isinstance(mb, Mailbox)
+        assert mb.status == "active"
+        assert mb.webhook_url == "https://hook.example.com"
+
+    def test_get_mailbox_no_webhook(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "mailbox": MAILBOX, "status": "active", "webhook_url": None, "created_at": "2024-01-01T00:00:00Z",
+            })
+
+        client = _with_transport(_make_client(), handler)
+        mb = client.get_mailbox()
+        assert mb.webhook_url is None
+
+
+class TestUpdateMailbox:
+    def test_update_mailbox(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "PATCH"
+            body = json.loads(request.content)
+            assert body["webhook_url"] == "https://new-hook.com"
+            return httpx.Response(200, json={"mailbox": MAILBOX, "webhook_url": "https://new-hook.com"})
+
+        client = _with_transport(_make_client(), handler)
+        mb = client.update_mailbox(webhook_url="https://new-hook.com")
+        assert mb.webhook_url == "https://new-hook.com"
+
+    def test_update_mailbox_clear_webhook(self) -> None:
+        """Passing webhook_url=None should send null to clear the webhook."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            assert body["webhook_url"] is None
+            return httpx.Response(200, json={"mailbox": MAILBOX, "webhook_url": None})
+
+        client = _with_transport(_make_client(), handler)
+        mb = client.update_mailbox(webhook_url=None)
+        assert mb.webhook_url is None
+
+    def test_update_mailbox_no_args(self) -> None:
+        """Omitting webhook_url should send empty body (no changes)."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            assert "webhook_url" not in body
+            return httpx.Response(200, json={"mailbox": MAILBOX, "status": "active"})
+
+        client = _with_transport(_make_client(), handler)
+        mb = client.update_mailbox()
+        assert mb.mailbox == MAILBOX
+
+
+class TestDeleteMailbox:
+    def test_delete_mailbox(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "DELETE"
+            assert request.url.path == "/api/mailbox"
+            return httpx.Response(200, json={"ok": True, "deleted": MAILBOX, "r2_blobs_deleted": 42})
+
+        client = _with_transport(_make_client(), handler)
+        result = client.delete_mailbox()
+        assert isinstance(result, MailboxDeleteResult)
+        assert result.ok is True
+        assert result.r2_blobs_deleted == 42
+
+
+class TestPauseResumeMailbox:
+    def test_pause_mailbox(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/mailbox/pause"
+            assert request.method == "PATCH"
+            return httpx.Response(200, json={"mailbox": MAILBOX, "status": "paused"})
+
+        client = _with_transport(_make_client(), handler)
+        mb = client.pause_mailbox()
+        assert mb.status == "paused"
+
+    def test_resume_mailbox(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/mailbox/resume"
+            assert request.method == "PATCH"
+            return httpx.Response(200, json={"mailbox": MAILBOX, "status": "active"})
+
+        client = _with_transport(_make_client(), handler)
+        mb = client.resume_mailbox()
+        assert mb.status == "active"
+
+
+# ---------------------------------------------------------------------------
+# Webhook routes
+# ---------------------------------------------------------------------------
+
+
+class TestWebhookRoutes:
+    def test_get_webhook_routes(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/mailbox/routes"
+            return httpx.Response(200, json={
+                "mailbox": MAILBOX,
+                "routes": [
+                    {"label": "code", "webhook_url": "https://hook.com/code", "created_at": "2024-01-01T00:00:00Z"},
+                    {"label": "newsletter", "webhook_url": "https://hook.com/news", "created_at": "2024-01-01T00:00:00Z"},
+                ],
+            })
+
+        client = _with_transport(_make_client(), handler)
+        result = client.get_webhook_routes()
+        assert isinstance(result, WebhookRouteList)
+        assert len(result.routes) == 2
+        assert result.routes[0].label == "code"
+
+    def test_get_webhook_routes_empty(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"mailbox": MAILBOX, "routes": []})
+
+        client = _with_transport(_make_client(), handler)
+        result = client.get_webhook_routes()
+        assert result.routes == []
+
+    def test_set_webhook_route(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "PUT"
+            body = json.loads(request.content)
+            assert body["label"] == "code"
+            assert body["webhook_url"] == "https://hook.com/code"
+            return httpx.Response(200, json={"label": "code", "webhook_url": "https://hook.com/code"})
+
+        client = _with_transport(_make_client(), handler)
+        route = client.set_webhook_route("code", "https://hook.com/code")
+        assert isinstance(route, WebhookRoute)
+        assert route.label == "code"
+
+    def test_delete_webhook_route(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "DELETE"
+            assert request.url.params["label"] == "newsletter"
+            return httpx.Response(200, json={"ok": True, "deleted": "newsletter"})
+
+        client = _with_transport(_make_client(), handler)
+        assert client.delete_webhook_route("newsletter") is True
+
+    def test_delete_webhook_route_not_found(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"error": "Not found"})
+
+        client = _with_transport(_make_client(), handler)
+        assert client.delete_webhook_route("nope") is False
+
+
+# ---------------------------------------------------------------------------
+# Claim mailbox + health
+# ---------------------------------------------------------------------------
+
+
+class TestClaimMailbox:
+    def test_claim_mailbox(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/claim/auto"
+            body = json.loads(request.content)
+            assert body["name"] == "my-agent"
+            return httpx.Response(201, json={"mailbox": "my-agent@mails0.com", "api_key": "key-abc"})
+
+        client = _with_transport(_make_client(), handler)
+        result = client.claim_mailbox("my-agent")
+        assert isinstance(result, ClaimResult)
+        assert result.mailbox == "my-agent@mails0.com"
+        assert result.api_key == "key-abc"
+
+
+class TestHealth:
+    def test_health_ok(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/health"
+            return httpx.Response(200, json={"ok": True})
+
+        client = _with_transport(_make_client(), handler)
+        assert client.health() is True
+
+    def test_health_down(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500, json={"error": "down"})
+
+        client = _with_transport(_make_client(), handler)
+        assert client.health() is False
+
+    def test_health_network_error(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("Connection refused")
+
+        client = _with_transport(_make_client(), handler)
+        assert client.health() is False
+
+
+# ---------------------------------------------------------------------------
+# Parser unit tests for new parsers
+# ---------------------------------------------------------------------------
+
+
+class TestParseDomain:
+    def test_parse_domain_minimal(self) -> None:
+        d = _parse_domain({"id": "d1", "domain": "x.com"})
+        assert d.id == "d1"
+        assert d.domain == "x.com"
+        assert d.dns_records is None
+
+    def test_parse_domain_with_dns(self) -> None:
+        d = _parse_domain(_domain_with_dns())
+        assert d.dns_records is not None
+        assert d.dns_records.mx is not None
+        assert d.dns_records.mx.type == "MX"
+        assert d.dns_records.mx.priority == 10
+
+    def test_parse_dns_records_none(self) -> None:
+        assert _parse_dns_records(None) is None
+        assert _parse_dns_records({}) is None
+
+
+class TestParseWebhookRoute:
+    def test_parse_webhook_route(self) -> None:
+        r = _parse_webhook_route({"label": "code", "webhook_url": "https://x.com", "created_at": "2024-01-01"})
+        assert r.label == "code"
+
+    def test_parse_webhook_route_defaults(self) -> None:
+        r = _parse_webhook_route({})
+        assert r.label == ""
+        assert r.webhook_url == ""
+
+
+# ---------------------------------------------------------------------------
+# Hosted mode for new endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestGetEvents:
+    def test_get_events_parses_sse(self) -> None:
+        """get_events() should parse SSE lines into event dicts."""
+        sse_body = (
+            "event: email.received\n"
+            'data: {"mailbox": "a@b.com", "id": "e1"}\n'
+            "\n"
+            "event: email.sent\n"
+            'data: {"mailbox": "a@b.com", "id": "e2"}\n'
+            "\n"
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/events"
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=sse_body.encode(),
+            )
+
+        client = _with_transport(_make_client(), handler)
+        events = list(client.get_events())
+        assert len(events) == 2
+        assert events[0]["event"] == "email.received"
+        assert events[0]["data"]["id"] == "e1"
+        assert events[1]["event"] == "email.sent"
+
+    def test_get_events_default_event_type(self) -> None:
+        """Events without 'event:' line should default to 'message'."""
+        sse_body = 'data: {"ping": true}\n\n'
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=sse_body.encode())
+
+        client = _with_transport(_make_client(), handler)
+        events = list(client.get_events())
+        assert len(events) == 1
+        assert events[0]["event"] == "message"
+
+    def test_get_events_non_json_data(self) -> None:
+        """Non-JSON data should be returned as a raw string."""
+        sse_body = "data: just plain text\n\n"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=sse_body.encode())
+
+        client = _with_transport(_make_client(), handler)
+        events = list(client.get_events())
+        assert events[0]["data"] == "just plain text"
+
+    def test_get_events_with_params(self) -> None:
+        """get_events() should pass query params."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.params["mailbox"] == "a@b.com"
+            assert request.url.params["types"] == "email.received"
+            assert request.url.params["since"] == "2024-01-01T00:00:00Z"
+            return httpx.Response(200, content=b"")
+
+        client = _with_transport(_make_client(), handler)
+        list(client.get_events(mailbox="a@b.com", types="email.received", since="2024-01-01T00:00:00Z"))
+
+
+class TestHostedModeNewMethods:
+    def test_domains_use_v1(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/domains"
+            return httpx.Response(200, json={"domains": []})
+
+        client = _with_transport(MailsClient(API_URL, TOKEN, MAILBOX, hosted=True), handler)
+        client.get_domains()
+
+    def test_mailbox_use_v1(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/mailbox"
+            return httpx.Response(200, json={"mailbox": MAILBOX, "status": "active"})
+
+        client = _with_transport(MailsClient(API_URL, TOKEN, MAILBOX, hosted=True), handler)
+        client.get_mailbox()
+
+    def test_claim_use_v1(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/claim/auto"
+            return httpx.Response(201, json={"mailbox": "x@mails0.com", "api_key": "k"})
+
+        client = _with_transport(MailsClient(API_URL, TOKEN, MAILBOX, hosted=True), handler)
+        client.claim_mailbox("x")
+
+    def test_webhook_routes_use_v1(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/mailbox/routes"
+            return httpx.Response(200, json={"mailbox": MAILBOX, "routes": []})
+
+        client = _with_transport(MailsClient(API_URL, TOKEN, MAILBOX, hosted=True), handler)
+        client.get_webhook_routes()
+
+
+# ---------------------------------------------------------------------------
+# Async tests for new endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncDomains:
+    @pytest.mark.anyio
+    async def test_async_get_domains(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/domains"
+            return httpx.Response(200, json={"domains": [_domain_dict()]})
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        domains = await client.get_domains()
+        assert len(domains) == 1
+        assert isinstance(domains[0], Domain)
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_add_domain(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=_domain_with_dns(domain="async.com"))
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        domain = await client.add_domain("async.com")
+        assert domain.domain == "async.com"
+        assert domain.dns_records is not None
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_get_domain(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/api/domains/d1"
+            return httpx.Response(200, json=_domain_with_dns())
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        domain = await client.get_domain("d1")
+        assert domain.id == "dom-1"
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_verify_domain(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "id": "d1", "domain": "x.com", "status": "verified",
+                "mx_verified": True, "spf_verified": False, "message": "MX ok",
+            })
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        result = await client.verify_domain("d1")
+        assert result.mx_verified is True
+        assert result.spf_verified is False
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_delete_domain(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True})
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        assert await client.delete_domain("d1") is True
+        await client.close()
+
+
+class TestAsyncMailbox:
+    @pytest.mark.anyio
+    async def test_async_get_mailbox(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "mailbox": MAILBOX, "status": "active", "webhook_url": None, "created_at": "2024-01-01T00:00:00Z",
+            })
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        mb = await client.get_mailbox()
+        assert mb.status == "active"
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_update_mailbox(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"mailbox": MAILBOX, "webhook_url": "https://h.com"})
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        mb = await client.update_mailbox(webhook_url="https://h.com")
+        assert mb.webhook_url == "https://h.com"
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_delete_mailbox(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True, "deleted": MAILBOX, "r2_blobs_deleted": 5})
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        result = await client.delete_mailbox()
+        assert result.ok is True
+        assert result.r2_blobs_deleted == 5
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_pause_mailbox(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"mailbox": MAILBOX, "status": "paused"})
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        mb = await client.pause_mailbox()
+        assert mb.status == "paused"
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_resume_mailbox(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"mailbox": MAILBOX, "status": "active"})
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        mb = await client.resume_mailbox()
+        assert mb.status == "active"
+        await client.close()
+
+
+class TestAsyncWebhookRoutes:
+    @pytest.mark.anyio
+    async def test_async_get_webhook_routes(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "mailbox": MAILBOX, "routes": [{"label": "code", "webhook_url": "https://h.com", "created_at": "2024-01-01"}],
+            })
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        result = await client.get_webhook_routes()
+        assert len(result.routes) == 1
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_set_webhook_route(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"label": "code", "webhook_url": "https://h.com"})
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        route = await client.set_webhook_route("code", "https://h.com")
+        assert route.label == "code"
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_delete_webhook_route(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True})
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        assert await client.delete_webhook_route("code") is True
+        await client.close()
+
+
+class TestAsyncClaimAndHealth:
+    @pytest.mark.anyio
+    async def test_async_claim_mailbox(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(201, json={"mailbox": "x@mails0.com", "api_key": "key"})
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        result = await client.claim_mailbox("x")
+        assert result.api_key == "key"
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_health_ok(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True})
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        assert await client.health() is True
+        await client.close()
+
+    @pytest.mark.anyio
+    async def test_async_health_down(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500, json={"error": "down"})
+
+        client = _with_transport(AsyncMailsClient(API_URL, TOKEN, MAILBOX), handler)
+        assert await client.health() is False
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# New model tests
+# ---------------------------------------------------------------------------
+
+
+class TestNewModels:
+    def test_domain_defaults(self) -> None:
+        d = Domain(id="d1", domain="x.com", status="pending")
+        assert d.mx_verified is False
+        assert d.dns_records is None
+        assert d.instructions is None
+
+    def test_dns_record(self) -> None:
+        r = DnsRecord(type="MX", host="@", value="mx.x.com", purpose="routing", priority=10)
+        assert r.priority == 10
+
+    def test_dns_records_all_none(self) -> None:
+        r = DnsRecords()
+        assert r.mx is None
+        assert r.spf is None
+        assert r.dmarc is None
+
+    def test_mailbox_defaults(self) -> None:
+        m = Mailbox(mailbox="a@b.com")
+        assert m.status == ""
+        assert m.webhook_url is None
+
+    def test_mailbox_delete_result(self) -> None:
+        r = MailboxDeleteResult(ok=True, deleted="a@b.com", r2_blobs_deleted=10)
+        assert r.r2_blobs_deleted == 10
+
+    def test_webhook_route(self) -> None:
+        r = WebhookRoute(label="code", webhook_url="https://x.com")
+        assert r.created_at == ""
+
+    def test_webhook_route_list(self) -> None:
+        wrl = WebhookRouteList(mailbox="a@b.com", routes=[WebhookRoute(label="code", webhook_url="https://x.com")])
+        assert len(wrl.routes) == 1
+
+    def test_claim_result(self) -> None:
+        c = ClaimResult(mailbox="a@b.com", api_key="key-123")
+        assert c.api_key == "key-123"
+
+    def test_domain_verification(self) -> None:
+        v = DomainVerification(id="d1", domain="x.com", status="verified", mx_verified=True, spf_verified=True, message="ok")
+        assert v.mx_verified is True
