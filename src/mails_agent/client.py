@@ -17,6 +17,7 @@ from .models import (
     DomainVerification,
     Email,
     EmailThread,
+    IngestStats,
     Mailbox,
     MailboxDeleteResult,
     MailboxStats,
@@ -195,7 +196,7 @@ class MailsClient:
     """Synchronous client for the mails-agent API.
 
     Args:
-        api_url: Worker API base URL (e.g. ``https://mails-worker.genedai.workers.dev``).
+        api_url: Worker API base URL (e.g. ``https://api.mails0.com``).
         token: API key or worker token for authentication.
         mailbox: Your email address (e.g. ``agent@mails0.com``).
         timeout: Request timeout in seconds. Defaults to 60 to accommodate
@@ -248,9 +249,13 @@ class MailsClient:
         to: Union[str, List[str]],
         subject: str,
         *,
+        from_address: Optional[str] = None,
+        cc: Optional[Union[str, List[str]]] = None,
+        bcc: Optional[Union[str, List[str]]] = None,
         text: Optional[str] = None,
         html: Optional[str] = None,
         reply_to: Optional[str] = None,
+        in_reply_to: Optional[str] = None,
         headers: Optional[Dict[str, str]] = None,
         attachments: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> SendResult:
@@ -259,28 +264,40 @@ class MailsClient:
         Args:
             to: Recipient address or list of addresses.
             subject: Email subject line.
+            from_address: Sender address, e.g. ``"Display Name <user@example.com>"``.
+                Defaults to *mailbox*. The server enforces that the email
+                portion matches your mailbox.
+            cc: CC recipient(s).
+            bcc: BCC recipient(s).
             text: Plain-text body.
             html: HTML body.
             reply_to: Reply-to address.
+            in_reply_to: Message-ID of the email being replied to (for threading).
             headers: Extra email headers.
             attachments: List of attachment dicts with ``filename``, ``content``,
                 and optionally ``content_type`` / ``content_id``.
 
         Returns:
-            A :class:`SendResult` with the message id and provider info.
+            A :class:`SendResult` with the message id, provider info, and thread id.
         """
         recipients = [to] if isinstance(to, str) else list(to)
         payload: Dict[str, Any] = {
-            "from": self.mailbox,
+            "from": from_address or self.mailbox,
             "to": recipients,
             "subject": subject,
         }
+        if cc is not None:
+            payload["cc"] = [cc] if isinstance(cc, str) else list(cc)
+        if bcc is not None:
+            payload["bcc"] = [bcc] if isinstance(bcc, str) else list(bcc)
         if text is not None:
             payload["text"] = text
         if html is not None:
             payload["html"] = html
         if reply_to is not None:
             payload["reply_to"] = reply_to
+        if in_reply_to is not None:
+            payload["in_reply_to"] = in_reply_to
         if headers:
             payload["headers"] = headers
         if attachments:
@@ -293,6 +310,7 @@ class MailsClient:
             id=data["id"],
             provider=data.get("provider", ""),
             provider_id=data.get("provider_id"),
+            thread_id=data.get("thread_id"),
         )
 
     def get_inbox(
@@ -495,12 +513,21 @@ class MailsClient:
         response = self._client.get(f"{self._prefix}/stats", params=params)
         _handle_error(response)
         data = response.json()
+        raw_ingest = data.get("ingest")
+        ingest = IngestStats(
+            pending=_safe_int(raw_ingest.get("pending")),
+            parsed=_safe_int(raw_ingest.get("parsed")),
+            failed=_safe_int(raw_ingest.get("failed")),
+        ) if isinstance(raw_ingest, dict) else None
         return MailboxStats(
             mailbox=data.get("mailbox", self.mailbox),
             total_emails=_safe_int(data.get("total_emails")),
             inbound=_safe_int(data.get("inbound")),
             outbound=_safe_int(data.get("outbound")),
             emails_this_month=_safe_int(data.get("emails_this_month")),
+            ingest=ingest,
+            suppression_count=_safe_int(data.get("suppression_count")),
+            webhook_routes=_safe_int(data.get("webhook_routes")),
         )
 
     def get_threads(
@@ -950,25 +977,35 @@ class AsyncMailsClient:
         to: Union[str, List[str]],
         subject: str,
         *,
+        from_address: Optional[str] = None,
+        cc: Optional[Union[str, List[str]]] = None,
+        bcc: Optional[Union[str, List[str]]] = None,
         text: Optional[str] = None,
         html: Optional[str] = None,
         reply_to: Optional[str] = None,
+        in_reply_to: Optional[str] = None,
         headers: Optional[Dict[str, str]] = None,
         attachments: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> SendResult:
         """Send an email. See :meth:`MailsClient.send` for details."""
         recipients = [to] if isinstance(to, str) else list(to)
         payload: Dict[str, Any] = {
-            "from": self.mailbox,
+            "from": from_address or self.mailbox,
             "to": recipients,
             "subject": subject,
         }
+        if cc is not None:
+            payload["cc"] = [cc] if isinstance(cc, str) else list(cc)
+        if bcc is not None:
+            payload["bcc"] = [bcc] if isinstance(bcc, str) else list(bcc)
         if text is not None:
             payload["text"] = text
         if html is not None:
             payload["html"] = html
         if reply_to is not None:
             payload["reply_to"] = reply_to
+        if in_reply_to is not None:
+            payload["in_reply_to"] = in_reply_to
         if headers:
             payload["headers"] = headers
         if attachments:
@@ -983,6 +1020,7 @@ class AsyncMailsClient:
             id=data["id"],
             provider=data.get("provider", ""),
             provider_id=data.get("provider_id"),
+            thread_id=data.get("thread_id"),
         )
 
     async def get_inbox(
@@ -1111,12 +1149,21 @@ class AsyncMailsClient:
         response = await self._client.get(f"{self._prefix}/stats", params=params)
         _handle_error(response)
         data = response.json()
+        raw_ingest = data.get("ingest")
+        ingest = IngestStats(
+            pending=_safe_int(raw_ingest.get("pending")),
+            parsed=_safe_int(raw_ingest.get("parsed")),
+            failed=_safe_int(raw_ingest.get("failed")),
+        ) if isinstance(raw_ingest, dict) else None
         return MailboxStats(
             mailbox=data.get("mailbox", self.mailbox),
             total_emails=_safe_int(data.get("total_emails")),
             inbound=_safe_int(data.get("inbound")),
             outbound=_safe_int(data.get("outbound")),
             emails_this_month=_safe_int(data.get("emails_this_month")),
+            ingest=ingest,
+            suppression_count=_safe_int(data.get("suppression_count")),
+            webhook_routes=_safe_int(data.get("webhook_routes")),
         )
 
     async def get_threads(
