@@ -79,6 +79,7 @@ class SendResult:
     id: str
     provider: str = ""
     provider_id: Optional[str] = None
+    thread_id: Optional[str] = None
 
 
 @dataclass
@@ -93,6 +94,15 @@ class VerificationCode:
 
 
 @dataclass
+class IngestStats:
+    """Ingest pipeline statistics."""
+
+    pending: int = 0
+    parsed: int = 0
+    failed: int = 0
+
+
+@dataclass
 class MailboxStats:
     """Result of the /api/stats endpoint."""
 
@@ -101,6 +111,9 @@ class MailboxStats:
     inbound: int = 0
     outbound: int = 0
     emails_this_month: int = 0
+    ingest: Optional[IngestStats] = None
+    suppression_count: int = 0
+    webhook_routes: int = 0
 
 
 @dataclass

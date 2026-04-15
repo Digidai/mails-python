@@ -11,6 +11,7 @@ from .models import (
     DomainVerification,
     Email,
     EmailThread,
+    IngestStats,
     Mailbox,
     MailboxDeleteResult,
     MailboxStats,
@@ -32,6 +33,7 @@ __all__ = [
     "SendResult",
     "VerificationCode",
     "MailboxStats",
+    "IngestStats",
     "MeInfo",
     # Domain management
     "Domain",

@@ -50,7 +50,7 @@ The SDK supports two routing modes that match the Worker API:
 client = MailsClient(api_url="https://your-worker.com", token="...", mailbox="agent@mails0.com")
 
 # Hosted
-client = MailsClient(api_url="https://mails-worker.genedai.workers.dev", token="...", mailbox="agent@mails0.com", hosted=True)
+client = MailsClient(api_url="https://api.mails0.com", token="...", mailbox="agent@mails0.com", hosted=True)
 ```
 
 ## API reference
