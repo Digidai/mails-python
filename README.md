@@ -42,20 +42,20 @@ if code:
 
 The SDK supports two routing modes that match the Worker API:
 
-- **Self-hosted** (`/api/*` routes, default): The `?to=` query parameter is sent for mailbox filtering. Use this when running your own Worker.
-- **Hosted** (`/v1/*` routes): The mailbox is bound to the API token, so `?to=` is not needed. Use this for the hosted mails0.com service.
+- **Self-hosted** (`/api/*` routes): The `?to=` query parameter is sent for mailbox filtering. Use this when running your own Worker.
+- **Hosted** (`/v1/*` routes): The mailbox is bound to the API token, so `?to=` is not needed. The SDK now infers this automatically for `https://api.mails0.com` or `mk_` tokens.
 
 ```python
-# Self-hosted (default)
+# Self-hosted
 client = MailsClient(api_url="https://your-worker.com", token="...", mailbox="agent@mails0.com")
 
-# Hosted
-client = MailsClient(api_url="https://api.mails0.com", token="...", mailbox="agent@mails0.com", hosted=True)
+# Hosted (auto-detected)
+client = MailsClient(api_url="https://api.mails0.com", token="mk_...", mailbox="agent@mails0.com")
 ```
 
 ## API reference
 
-### `MailsClient(api_url, token, mailbox, *, timeout=60.0, hosted=False)`
+### `MailsClient(api_url, token, mailbox, *, timeout=60.0, hosted=None)`
 
 Create a synchronous client. Supports use as a context manager:
 

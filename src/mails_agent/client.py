@@ -207,9 +207,19 @@ def _parse_stats(data: Dict[str, Any], fallback_mailbox: str) -> MailboxStats:
     )
 
 
+HOSTED_API_URL = "https://api.mails0.com"
+
+
 def _api_prefix(is_v1: bool) -> str:
     """Return the route prefix for the current mode."""
     return "/v1" if is_v1 else "/api"
+
+
+def _infer_hosted(api_url: str, token: str, hosted: Optional[bool]) -> bool:
+    """Infer hosted mode for the public mails0 API while preserving overrides."""
+    if hosted is not None:
+        return hosted
+    return api_url.rstrip("/") == HOSTED_API_URL or token.startswith("mk_")
 
 
 class MailsClient:
@@ -222,8 +232,8 @@ class MailsClient:
         timeout: Request timeout in seconds. Defaults to 60 to accommodate
             long-polling ``wait_for_code`` calls.
         hosted: When ``True``, use ``/v1/*`` routes (hosted mode) instead of
-            ``/api/*`` (self-hosted). In hosted mode the mailbox is bound to
-            the token, so the ``?to=`` parameter is not sent.
+            ``/api/*`` (self-hosted). When ``None`` (default), hosted mode is
+            inferred for ``https://api.mails0.com`` or ``mk_`` tokens.
     """
 
     def __init__(
@@ -233,13 +243,13 @@ class MailsClient:
         mailbox: str,
         *,
         timeout: float = 60.0,
-        hosted: bool = False,
+        hosted: Optional[bool] = None,
     ) -> None:
         self.api_url = api_url.rstrip("/")
         self.token = token
         self.mailbox = mailbox
-        self.hosted = hosted
-        self._prefix = _api_prefix(hosted)
+        self.hosted = _infer_hosted(self.api_url, token, hosted)
+        self._prefix = _api_prefix(self.hosted)
         self._client = httpx.Client(
             base_url=self.api_url,
             headers={"Authorization": f"Bearer {token}"},
@@ -939,7 +949,9 @@ class AsyncMailsClient:
         token: API key or worker token for authentication.
         mailbox: Your email address.
         timeout: Request timeout in seconds (default 60).
-        hosted: When ``True``, use ``/v1/*`` routes (hosted mode).
+        hosted: When ``True``, use ``/v1/*`` routes (hosted mode). When
+            ``None`` (default), hosted mode is inferred for hosted API URLs or
+            ``mk_`` tokens.
     """
 
     def __init__(
@@ -949,13 +961,13 @@ class AsyncMailsClient:
         mailbox: str,
         *,
         timeout: float = 60.0,
-        hosted: bool = False,
+        hosted: Optional[bool] = None,
     ) -> None:
         self.api_url = api_url.rstrip("/")
         self.token = token
         self.mailbox = mailbox
-        self.hosted = hosted
-        self._prefix = _api_prefix(hosted)
+        self.hosted = _infer_hosted(self.api_url, token, hosted)
+        self._prefix = _api_prefix(self.hosted)
         self._client = httpx.AsyncClient(
             base_url=self.api_url,
             headers={"Authorization": f"Bearer {token}"},

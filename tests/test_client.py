@@ -33,6 +33,7 @@ from mails_agent.client import (
 API_URL = "https://mails-worker.example.com"
 TOKEN = "test-token"
 MAILBOX = "agent@mails0.com"
+HOSTED_TOKEN = "mk_" + "a" * 64
 
 
 # ---------------------------------------------------------------------------
@@ -689,6 +690,21 @@ class TestHostedMode:
 
     def test_selfhosted_client_uses_api_prefix(self) -> None:
         client = _make_client(hosted=False)
+        assert client._prefix == "/api"
+        assert client.hosted is False
+
+    def test_hosted_mode_is_inferred_from_public_api_url(self) -> None:
+        client = MailsClient("https://api.mails0.com", TOKEN, MAILBOX)
+        assert client._prefix == "/v1"
+        assert client.hosted is True
+
+    def test_hosted_mode_is_inferred_from_mk_token(self) -> None:
+        client = MailsClient("https://worker.example.com", HOSTED_TOKEN, MAILBOX)
+        assert client._prefix == "/v1"
+        assert client.hosted is True
+
+    def test_explicit_selfhosted_override_is_preserved(self) -> None:
+        client = MailsClient(API_URL, TOKEN, MAILBOX, hosted=False)
         assert client._prefix == "/api"
         assert client.hosted is False
 
