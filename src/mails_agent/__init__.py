@@ -22,7 +22,7 @@ from .models import (
     WebhookRouteList,
 )
 
-__version__ = "1.6.0"
+__version__ = "1.7.1"
 __all__ = [
     "MailsClient",
     "AsyncMailsClient",

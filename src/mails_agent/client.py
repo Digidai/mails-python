@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncIterator, Dict, Generator, Iterator, List, Optional, Sequence, Union
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Sequence, Union
 
 import httpx
 
@@ -185,6 +185,26 @@ def _handle_error(response: httpx.Response) -> None:
         except Exception:
             message = response.reason_phrase or f"HTTP {response.status_code}"
         raise ApiError(message, response.status_code)
+
+
+def _parse_stats(data: Dict[str, Any], fallback_mailbox: str) -> MailboxStats:
+    """Convert a raw /stats response into a MailboxStats dataclass."""
+    raw_ingest = data.get("ingest")
+    ingest = IngestStats(
+        pending=_safe_int(raw_ingest.get("pending")),
+        parsed=_safe_int(raw_ingest.get("parsed")),
+        failed=_safe_int(raw_ingest.get("failed")),
+    ) if isinstance(raw_ingest, dict) else None
+    return MailboxStats(
+        mailbox=data.get("mailbox", fallback_mailbox),
+        total_emails=_safe_int(data.get("total_emails")),
+        inbound=_safe_int(data.get("inbound")),
+        outbound=_safe_int(data.get("outbound")),
+        emails_this_month=_safe_int(data.get("emails_this_month")),
+        ingest=ingest,
+        suppression_count=_safe_int(data.get("suppression_count")),
+        webhook_routes=_safe_int(data.get("webhook_routes")),
+    )
 
 
 def _api_prefix(is_v1: bool) -> str:
@@ -512,23 +532,7 @@ class MailsClient:
             params["to"] = self.mailbox
         response = self._client.get(f"{self._prefix}/stats", params=params)
         _handle_error(response)
-        data = response.json()
-        raw_ingest = data.get("ingest")
-        ingest = IngestStats(
-            pending=_safe_int(raw_ingest.get("pending")),
-            parsed=_safe_int(raw_ingest.get("parsed")),
-            failed=_safe_int(raw_ingest.get("failed")),
-        ) if isinstance(raw_ingest, dict) else None
-        return MailboxStats(
-            mailbox=data.get("mailbox", self.mailbox),
-            total_emails=_safe_int(data.get("total_emails")),
-            inbound=_safe_int(data.get("inbound")),
-            outbound=_safe_int(data.get("outbound")),
-            emails_this_month=_safe_int(data.get("emails_this_month")),
-            ingest=ingest,
-            suppression_count=_safe_int(data.get("suppression_count")),
-            webhook_routes=_safe_int(data.get("webhook_routes")),
-        )
+        return _parse_stats(response.json(), self.mailbox)
 
     def get_threads(
         self,
@@ -1148,23 +1152,7 @@ class AsyncMailsClient:
             params["to"] = self.mailbox
         response = await self._client.get(f"{self._prefix}/stats", params=params)
         _handle_error(response)
-        data = response.json()
-        raw_ingest = data.get("ingest")
-        ingest = IngestStats(
-            pending=_safe_int(raw_ingest.get("pending")),
-            parsed=_safe_int(raw_ingest.get("parsed")),
-            failed=_safe_int(raw_ingest.get("failed")),
-        ) if isinstance(raw_ingest, dict) else None
-        return MailboxStats(
-            mailbox=data.get("mailbox", self.mailbox),
-            total_emails=_safe_int(data.get("total_emails")),
-            inbound=_safe_int(data.get("inbound")),
-            outbound=_safe_int(data.get("outbound")),
-            emails_this_month=_safe_int(data.get("emails_this_month")),
-            ingest=ingest,
-            suppression_count=_safe_int(data.get("suppression_count")),
-            webhook_routes=_safe_int(data.get("webhook_routes")),
-        )
+        return _parse_stats(response.json(), self.mailbox)
 
     async def get_threads(
         self,

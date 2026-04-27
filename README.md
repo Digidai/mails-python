@@ -66,18 +66,43 @@ with MailsClient(api_url, token, mailbox) as client:
 
 ---
 
-### `send(to, subject, *, text=None, html=None, reply_to=None, headers=None, attachments=None) -> SendResult`
+### `send(to, subject, *, from_address=None, cc=None, bcc=None, text=None, html=None, reply_to=None, in_reply_to=None, headers=None, attachments=None) -> SendResult`
 
-Send an email. `to` can be a single address or a list.
+Send an email. `to`, `cc`, and `bcc` each accept a single address or a list.
 
 ```python
 result = client.send(
     to=["alice@example.com", "bob@example.com"],
     subject="Team update",
     html="<h1>Update</h1><p>Everything is on track.</p>",
+    cc="manager@example.com",
+    bcc=["audit@example.com"],
     reply_to="noreply@mails0.com",
     headers={"X-Custom-Header": "value"},
 )
+```
+
+**Custom sender** — use `from_address` to set a display name (the email must match your mailbox):
+
+```python
+client.send(
+    to="user@example.com",
+    subject="Hello",
+    text="Hi!",
+    from_address="My Agent <agent@mails0.com>",
+)
+```
+
+**Threading** — use `in_reply_to` with a Message-ID to create a threaded reply:
+
+```python
+result = client.send(
+    to="user@example.com",
+    subject="Re: Hello",
+    text="Thanks!",
+    in_reply_to="<original-message-id@example.com>",
+)
+print(f"Thread: {result.thread_id}")
 ```
 
 **Attachments** are passed as a list of dicts:
@@ -395,9 +420,10 @@ from mails_agent import AsyncMailsClient
 
 async def main():
     async with AsyncMailsClient(
-        api_url="https://mails-worker.your-domain.com",
+        api_url="https://api.mails0.com",
         token="your-api-token",
         mailbox="agent@mails0.com",
+        hosted=True,
     ) as client:
         # Send
         result = await client.send("user@example.com", "Hello", text="Hi!")
@@ -488,6 +514,7 @@ asyncio.run(main())
 | `id` | `str` | Message ID |
 | `provider` | `str` | Send provider used (may be empty) |
 | `provider_id` | `str \| None` | Provider-specific ID (e.g. Resend ID) |
+| `thread_id` | `str \| None` | Conversation thread ID |
 
 ### `VerificationCode`
 
@@ -549,6 +576,27 @@ asyncio.run(main())
 | `ok` | `bool` | Whether deletion succeeded |
 | `deleted` | `str` | Deleted mailbox address |
 | `r2_blobs_deleted` | `int` | Number of R2 blobs cleaned up |
+
+### `MailboxStats`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `mailbox` | `str` | Mailbox address |
+| `total_emails` | `int` | Total email count |
+| `inbound` | `int` | Inbound email count |
+| `outbound` | `int` | Outbound email count |
+| `emails_this_month` | `int` | Emails received this month |
+| `ingest` | `IngestStats \| None` | Ingest pipeline statistics |
+| `suppression_count` | `int` | Number of suppressed addresses |
+| `webhook_routes` | `int` | Number of webhook routes configured |
+
+### `IngestStats`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `pending` | `int` | Emails pending processing |
+| `parsed` | `int` | Successfully parsed emails |
+| `failed` | `int` | Failed email processing |
 
 ### `WebhookRoute`
 
